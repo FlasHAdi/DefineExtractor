@@ -15,7 +15,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
-
+#include <limits>
 #if __has_include(<filesystem>)
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -29,9 +29,6 @@ namespace fs = std::experimental::filesystem;
 using namespace std;
 using namespace std::chrono;
 
-// -----------------------------------------------------
-// Utilities for console colors & progress
-// -----------------------------------------------------
 static std::mutex consoleMutex;
 
 #ifdef _WIN32
@@ -40,15 +37,12 @@ void setColor(int color) {
 }
 #else
 void setColor(int color) {
-    // Basic color mapping
-    // 7 = default, 10 = bright green, 12 = bright red
-    // We'll map these loosely to ANSI codes
+    // Basic color mapping: 7=default, 10=green, 12=red
     cout << "\033[" << color << "m";
 }
 #endif
 
 void printProgress(size_t current, size_t total, int width = 50) {
-    // limit refresh to every ~100ms
     static auto lastUpdate = high_resolution_clock::now();
     auto now = high_resolution_clock::now();
     if (duration_cast<milliseconds>(now - lastUpdate).count() < 100)
@@ -71,9 +65,6 @@ void printProgress(size_t current, size_t total, int width = 50) {
 // -----------------------------------------------------
 // Data structures
 // -----------------------------------------------------
-/**
- * Holds the filename + the captured text block (either a #if define block or a function block).
- */
 struct CodeBlock {
     string filename;
     string content;
@@ -85,55 +76,20 @@ struct ParseResult {
 };
 
 // -----------------------------------------------------
-// Regex Helpers for #if-block detection
+// TEIL A: C++-Parsing (#if define, function-blocks)
 // -----------------------------------------------------
+
 static const regex endifRegex(R"(^\s*#\s*endif\b)",
     regex_constants::ECMAScript | regex_constants::optimize);
 
-// We’ll use a simpler approach to detect *any* #if/#ifdef/#ifndef:
 static const regex anyIfStartRegex(R"(^\s*#\s*(if|ifdef|ifndef)\b)",
     regex_constants::ECMAScript | regex_constants::optimize);
 
-// #elif or #else do not start new nesting, so we ignore them for "++", but we do store them in the output as part of the block.
-
-//
-// For starting the define-block, we specifically look if the line
-// references the chosen define in #if / #ifdef / #ifndef / #elif variants.
-//
-// Example pattern for "FOO":
-//   #ifdef FOO
-//   #ifndef FOO
-//   #if defined(FOO)
-//   #if FOO
-//   #elif defined(FOO)
-//   #elif FOO
-//
-// This is used only to detect the *start* of "insideDefineBlock".
-//
 regex createConditionalRegex(const string& define) {
-    // We'll combine alternatives into one large pattern:
-    //   #ifdef DEFINE
-    //   #ifndef DEFINE
-    //   #if defined(DEFINE)
-    //   #elif defined(DEFINE)
-    //   #if DEFINE
-    //   #elif DEFINE
-    //   ... with optional parentheses etc.
-    //
-    // Using a capturing group with \b or spaces. 
-    //
-    // Explanation of pattern sections:
-    //  1) ^\s*#(ifdef|ifndef)\s+DEFINE\b
-    //  2) ^\s*#(if|elif)\s+defined\s*\(\s*DEFINE\s*\)
-    //  3) ^\s*#(if|elif)\s+defined\s+DEFINE
-    //  4) ^\s*#(if|elif)\s+\(?\s*DEFINE\s*\)?
-    //
-    // Note: We combine them with '|', so if *any* part matches, it’s a "start".
-    //
     ostringstream pattern;
     pattern
         << R"((^\s*#(ifdef|ifndef)\s+)" << define << R"(\b))"
-        << R"(|)" // OR
+        << R"(|)"
         << R"((^\s*#(if|elif)\s+defined\s*\(\s*)" << define << R"(\s*\)))"
         << R"(|)"
         << R"((^\s*#(if|elif)\s+defined\s+)" << define << R"())"
@@ -142,30 +98,14 @@ regex createConditionalRegex(const string& define) {
     return regex(pattern.str(), regex_constants::ECMAScript | regex_constants::optimize);
 }
 
-// -----------------------------------------------------
-// Regex to detect function signatures (heuristic)
-// -----------------------------------------------------
-// Typical matches might be:
-//   static inline int foo(...) {
-//   virtual void bar(...) const {
-//   MyClass::MyClass(...) : initializer {
-//   int foo(...) {
-//   friend Foo operator+(...) { 
-//
-// We'll try to handle multi-line by seeing if the line ends with '{', ';', or is incomplete.
 static const regex functionHeadRegex(
     R"(^\s*(?:inline\s+|static\s+|virtual\s+|constexpr\s+|friend\s+|typename\s+|[\w:\*&<>]+\s+)*[\w:\*&<>]+\s+\w[\w:\*&<>]*\s*\([^)]*\)\s*(\{|;|$))",
     regex_constants::ECMAScript | regex_constants::optimize
 );
 
-// -----------------------------------------------------
-// parseFileSinglePass
-//   - Finds #if(define) blocks (including nested #ifs).
-//   - Finds function blocks if they contain that #if(define).
-// -----------------------------------------------------
 pair<vector<CodeBlock>, vector<CodeBlock>>
 parseFileSinglePass(const string& filename,
-    const regex& startDefineRegex, // for checking #if referencing the chosen define
+    const regex& startDefineRegex,
     atomic<size_t>& processed,
     size_t totalLines,
     size_t& outLineCount)
@@ -182,13 +122,11 @@ parseFileSinglePass(const string& filename,
     int  defineNesting = 0;
     ostringstream currentDefineBlock;
 
-    // For function parsing:
     bool inFunction = false;
     int braceCount = 0;
-    bool functionRelevant = false; // if we see #if(define) inside this function
+    bool functionRelevant = false;
     ostringstream currentFunc;
 
-    // Multi-line function-head detection:
     bool potentialFunctionHead = false;
     ostringstream potentialHeadBuffer;
 
@@ -199,20 +137,14 @@ parseFileSinglePass(const string& filename,
         }
         outLineCount++;
 
-        // For progress
         size_t oldVal = processed.fetch_add(1, memory_order_relaxed);
         if ((oldVal + 1) % 200 == 0) {
             printProgress(oldVal + 1, totalLines);
         }
 
-        // -----------------------------------------------------
-        // 1) #if(define)-BLOCK logic
-        // -----------------------------------------------------
-
-        // If we're *not* yet inside a define-block, check if this line starts it:
+        // #if-block logic
         if (!insideDefineBlock) {
             if (regex_search(line, startDefineRegex)) {
-                // We found #if or #ifdef referencing the user-chosen define.
                 insideDefineBlock = true;
                 defineNesting = 1;
                 currentDefineBlock.str("");
@@ -221,24 +153,18 @@ parseFileSinglePass(const string& filename,
             }
         }
         else {
-            // We are inside a define-block. Always store the line:
             currentDefineBlock << line << "\n";
-
-            // Check if this line starts *any* #if/#ifdef/#ifndef => nesting++
             if (regex_search(line, anyIfStartRegex)) {
                 defineNesting++;
             }
-            // Check if #endif => nesting--
             else if (regex_search(line, endifRegex)) {
                 defineNesting--;
                 if (defineNesting <= 0) {
-                    // We close out this define-block
                     CodeBlock cb;
                     cb.filename = filename;
                     cb.content = "##########\n" + filename + "\n##########\n" +
                         currentDefineBlock.str();
                     defineBlocks.push_back(cb);
-
                     insideDefineBlock = false;
                     defineNesting = 0;
                     currentDefineBlock.str("");
@@ -247,94 +173,53 @@ parseFileSinglePass(const string& filename,
             }
         }
 
-        // -----------------------------------------------------
-        // 2) Function-block logic
-        //    We gather function bodies if they contain #if(define).
-        // -----------------------------------------------------
-
-        // We'll do a rough multi-line signature detection:
-
-        // Helper booleans:
+        // Function-block logic
         bool lineHasBraceOrParen = (line.find('{') != string::npos ||
             line.find('}') != string::npos ||
             line.find('(') != string::npos);
-
-        // Also see if line references the user-chosen define (to mark function relevant):
         bool lineMatchesDefine = regex_search(line, startDefineRegex);
 
         if (!inFunction) {
-            // Not currently in a function body
             if (potentialFunctionHead) {
-                // We have some partial function-head in 'potentialHeadBuffer'.
-                // We see if this line includes '{' or ';' => that might finalize the signature.
-                // (Heuristic: if we see '{', it means the function body starts.)
-                // (If we see ';', it might be just a prototype => no function body.)
-                // Or if the line still doesn't contain either, keep buffering.
-
-                // We'll combine with previous lines:
                 potentialHeadBuffer << "\n" << line;
-
-                // Check if it ends with '{' or contains '{'
                 bool hasOpenBrace = (line.find('{') != string::npos);
                 bool hasSemicolon = (line.find(';') != string::npos);
 
                 if (hasOpenBrace) {
-                    // Start function body
                     inFunction = true;
                     braceCount = 0;
-                    functionRelevant = false; // reset for new function
+                    functionRelevant = false;
                     currentFunc.str("");
                     currentFunc.clear();
 
-                    // Merge the potential head + this line
                     currentFunc << potentialHeadBuffer.str() << "\n";
-
-                    // Count braces in this line:
                     for (char c : line) {
                         if (c == '{') braceCount++;
                         if (c == '}') braceCount--;
                     }
-                    // Mark relevant if #if(define) found here:
-                    if (lineMatchesDefine) {
-                        functionRelevant = true;
-                    }
-
-                    // We consumed the potential head
+                    if (lineMatchesDefine) functionRelevant = true;
                     potentialFunctionHead = false;
                     potentialHeadBuffer.str("");
                     potentialHeadBuffer.clear();
                 }
                 else if (hasSemicolon) {
-                    // It's likely just a forward declaration or end of multiline prototype with no body
-                    // We'll discard it
                     potentialFunctionHead = false;
                     potentialHeadBuffer.str("");
                     potentialHeadBuffer.clear();
                 }
-                else {
-                    // We still do not have '{' or ';' => keep buffering
-                    // We'll wait for next line
-                }
             }
             else {
-                // Check if the current line itself looks like a function head
                 smatch match;
                 if (regex_search(line, match, functionHeadRegex)) {
-                    // match[1] is the group that might be '{' or ';' or empty
-                    string trailingSymbol = match[1].str(); // might be '{', ';', or empty
-
+                    string trailingSymbol = match[1].str();
                     if (trailingSymbol == "{") {
-                        // The function body starts right away
                         inFunction = true;
                         braceCount = 0;
                         functionRelevant = false;
                         currentFunc.str("");
                         currentFunc.clear();
-
-                        // Store the current line
                         currentFunc << line << "\n";
 
-                        // Count braces
                         for (char c : line) {
                             if (c == '{') braceCount++;
                             if (c == '}') braceCount--;
@@ -344,37 +229,28 @@ parseFileSinglePass(const string& filename,
                         }
                     }
                     else if (trailingSymbol == ";") {
-                        // Just a forward declaration, do nothing
+                        // forward declaration -> ignore
                     }
                     else {
-                        // Possibly multi-line function signature; store in buffer
                         potentialFunctionHead = true;
                         potentialHeadBuffer.str("");
                         potentialHeadBuffer.clear();
                         potentialHeadBuffer << line;
                     }
                 }
-                else {
-                    // Not matching functionHeadRegex => do nothing
-                }
             }
         }
         else {
-            // We are inside a function body
             currentFunc << line << "\n";
             if (lineMatchesDefine) {
                 functionRelevant = true;
             }
-
-            // Count braces in the line
             if (lineHasBraceOrParen) {
                 for (char c : line) {
                     if (c == '{') braceCount++;
                     if (c == '}') braceCount--;
                 }
             }
-
-            // If braceCount is 0 => function ended
             if (braceCount <= 0) {
                 if (functionRelevant) {
                     CodeBlock cb;
@@ -391,14 +267,10 @@ parseFileSinglePass(const string& filename,
             }
         }
 
-    } // end while(getline())
-
+    }
     return make_pair(defineBlocks, functionBlocks);
 }
 
-// -----------------------------------------------------
-// Worker thread function
-// -----------------------------------------------------
 void parseWorker(const vector<string>& files,
     size_t from,
     size_t to,
@@ -411,21 +283,14 @@ void parseWorker(const vector<string>& files,
         const auto& filename = files[i];
         size_t lineCount = 0;
         auto pr = parseFileSinglePass(filename, startDefineRegex, processed, totalLines, lineCount);
-
-        // Merge results
         result.defineBlocks.insert(result.defineBlocks.end(),
             pr.first.begin(), pr.first.end());
         result.functionBlocks.insert(result.functionBlocks.end(),
             pr.second.begin(), pr.second.end());
-
-        // Just to ensure progress bar updates
         printProgress(processed.load(), totalLines);
     }
 }
 
-// -----------------------------------------------------
-// Count lines across all files for progress
-// -----------------------------------------------------
 size_t countTotalLines(const vector<string>& files) {
     size_t total = 0;
     for (auto& f : files) {
@@ -439,82 +304,6 @@ size_t countTotalLines(const vector<string>& files) {
     return total;
 }
 
-// -----------------------------------------------------
-// Read #define names from a given header
-//   e.g. lines of form:  #define FOO
-// -----------------------------------------------------
-vector<string> readDefines(const string& filename) {
-    vector<string> result;
-    ifstream ifs(filename);
-    if (!ifs.is_open()) return result;
-
-    static const regex defineRegex(R"(^\s*#\s*define\s+(\w+))");
-    string line;
-    while (getline(ifs, line)) {
-        smatch m;
-        if (regex_search(line, m, defineRegex)) {
-            result.push_back(m[1].str());
-        }
-    }
-    return result;
-}
-
-// -----------------------------------------------------
-// Ask user: Client or Server
-//   Return the path to the discovered header (if found).
-// -----------------------------------------------------
-string findHeaderFile(bool& isClient) {
-    // Example sets you can modify based on your environment
-    unordered_set<string> clientFiles = { "locale_inc.h" };
-    unordered_set<string> serverFiles = { "service.h", "commondefines.h" };
-
-    vector<string> foundClientFiles;
-    vector<string> foundServerFiles;
-
-    for (const auto& entry : fs::recursive_directory_iterator(".")) {
-        if (!fs::is_regular_file(entry)) continue;
-
-        string filename = entry.path().filename().string();
-        // Lowercase for comparison
-        string lower = filename;
-        transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-
-        if (clientFiles.count(lower)) {
-            foundClientFiles.push_back(entry.path().string());
-        }
-        if (serverFiles.count(lower)) {
-            foundServerFiles.push_back(entry.path().string());
-        }
-    }
-
-    // Show client option in green if found, else red
-    setColor(foundClientFiles.empty() ? 12 : 10);
-    cout << "1. Client\n";
-    // Show server option
-    setColor(foundServerFiles.empty() ? 12 : 10);
-    cout << "2. Server\n";
-    setColor(7);
-
-    int choice;
-    cout << "Choice: ";
-    cin >> choice;
-
-    if (choice == 1 && !foundClientFiles.empty()) {
-        isClient = true;
-        return foundClientFiles[0];
-    }
-    else if (choice == 2 && !foundServerFiles.empty()) {
-        isClient = false;
-        return foundServerFiles[0];
-    }
-
-    cerr << "Header file not found.\n";
-    return "";
-}
-
-// -----------------------------------------------------
-// Search .cpp / .h files recursively
-// -----------------------------------------------------
 vector<string> findSourceFiles() {
     vector<string> result;
     for (auto& p : fs::recursive_directory_iterator(".")) {
@@ -527,23 +316,35 @@ vector<string> findSourceFiles() {
     return result;
 }
 
-// -----------------------------------------------------
-// Multi-thread parse for a single define
-// -----------------------------------------------------
+vector<string> readDefines(const string& filename) {
+    vector<string> result;
+    ifstream ifs(filename);
+    if (!ifs.is_open()) {
+        cerr << "Konnte " << filename << " nicht öffnen!\n";
+        return result;
+    }
+
+    static const regex defineRegex(R"(^\s*#\s*define\s+(\w+))");
+    string line;
+    while (getline(ifs, line)) {
+        smatch m;
+        if (regex_search(line, m, defineRegex)) {
+            result.push_back(m[1].str());
+        }
+    }
+    return result;
+}
+
 pair<vector<CodeBlock>, vector<CodeBlock>>
 parseAllFilesMultiThread(const vector<string>& files, const string& define)
 {
-    // 1) Create the regex for lines that start #if define
     regex startDefineRegex = createConditionalRegex(define);
-
-    // 2) Count total lines (for progress bar)
     cout << "Zaehle Zeilen...\n";
     size_t totalLines = countTotalLines(files);
     cout << "Gesamt: " << totalLines << " Zeilen.\n";
 
-    // 3) Create threads
     unsigned int hwThreads = thread::hardware_concurrency();
-    if (hwThreads == 0) hwThreads = 2; // fallback
+    if (hwThreads == 0) hwThreads = 2;
     size_t numThreads = std::min<size_t>(hwThreads, files.size());
     cout << "Starte " << numThreads << " Thread(s)...\n";
 
@@ -553,12 +354,10 @@ parseAllFilesMultiThread(const vector<string>& files, const string& define)
     size_t chunkSize = (files.size() + numThreads - 1) / numThreads;
 
     auto startTime = high_resolution_clock::now();
-
     for (size_t t = 0; t < numThreads; ++t) {
         size_t from = t * chunkSize;
         if (from >= files.size()) break;
         size_t to = std::min<size_t>(from + chunkSize, files.size());
-
         threads.emplace_back(parseWorker,
             cref(files),
             from,
@@ -568,12 +367,10 @@ parseAllFilesMultiThread(const vector<string>& files, const string& define)
             totalLines,
             ref(partialResults[t]));
     }
-
     for (auto& th : threads) {
         th.join();
     }
 
-    // Collect results
     vector<CodeBlock> allDefineBlocks;
     vector<CodeBlock> allFunctionBlocks;
     for (auto& pr : partialResults) {
@@ -582,126 +379,624 @@ parseAllFilesMultiThread(const vector<string>& files, const string& define)
         allFunctionBlocks.insert(allFunctionBlocks.end(),
             pr.functionBlocks.begin(), pr.functionBlocks.end());
     }
-
-    // Final progress = 100%
     printProgress(totalLines, totalLines);
     cout << "\n";
 
     auto endTime = high_resolution_clock::now();
     auto ms = duration_cast<milliseconds>(endTime - startTime).count();
-
     cout << "Parsing '" << define << "' fertig in " << ms << " ms\n";
+
     return make_pair(allDefineBlocks, allFunctionBlocks);
 }
 
 // -----------------------------------------------------
-// Main menu loop
+// TEIL B: PYTHON-Parsen
 // -----------------------------------------------------
-void showMenu(const vector<string>& defines,
-    const vector<string>& files,
-    bool isClient)
+static const regex pythonIfAppRegex(
+    R"((?:if|elif)\s*\(?\s*app\.(\w+))",
+    regex_constants::ECMAScript | regex_constants::optimize);
+
+static const regex defRegex(R"(^\s*def\s+[\w_]+)");
+
+// naive Indentation-Hilfsfunktion
+int getIndent(const string& ln) {
+    int count = 0;
+    for (char c : ln) {
+        if (c == ' ') count++;
+        else if (c == '\t') count += 4; // naive tab=4
+        else break;
+    }
+    return count;
+}
+
+// parseSingleFile (python)
+pair<vector<CodeBlock>, vector<CodeBlock>>
+parsePythonFileSinglePass(const string& filename,
+    const string& param,
+    atomic<size_t>& processed,
+    size_t totalLines,
+    size_t& outLineCount)
 {
-    if (files.empty() || defines.empty()) {
-        cerr << "Keine Dateien oder keine Defines.\n";
-        return;
+    vector<CodeBlock> ifBlocks;
+    vector<CodeBlock> funcBlocks;
+
+    ifstream ifs(filename);
+    if (!ifs.is_open()) {
+        return make_pair(ifBlocks, funcBlocks);
     }
 
-    fs::create_directory("Output");
-    string prefix = isClient ? "CLIENT_" : "SERVER_";
+    // build param-regex
+    ostringstream oss;
+    oss << R"((?:if|elif)\s*\(?\s*app\.)" << param << R"(\b)";
+    regex ifParamRegex(oss.str(), regex_constants::ECMAScript | regex_constants::optimize);
+
+    // load all lines
+    vector<string> lines;
+    {
+        string line;
+        while (getline(ifs, line)) {
+            lines.push_back(line);
+        }
+    }
+
+    bool insideFunc = false;
+    int funcIndent = 0;
+    ostringstream currentFunc;
+    bool functionRelevant = false;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        size_t oldVal = processed.fetch_add(1, memory_order_relaxed);
+        if ((oldVal + 1) % 200 == 0) {
+            printProgress(oldVal + 1, totalLines);
+        }
+        outLineCount++;
+
+        const string& line = lines[i];
+
+        // check def start
+        if (regex_search(line, defRegex)) {
+            // schließe ggf. vorherige Funktion ab
+            if (insideFunc && functionRelevant) {
+                CodeBlock cb;
+                cb.filename = filename;
+                cb.content = "##########\n" + filename + "\n##########\n" +
+                    currentFunc.str();
+                funcBlocks.push_back(cb);
+            }
+            // neue Funktion
+            insideFunc = true;
+            funcIndent = getIndent(line);
+            currentFunc.str("");
+            currentFunc.clear();
+            currentFunc << line << "\n";
+            functionRelevant = false;
+            continue;
+        }
+
+        // prüfe, ob wir die aktuelle Funktion verlassen
+        if (insideFunc) {
+            int currentIndent = getIndent(line);
+            // wenn wir eine Zeile mit Einrückung <= funcIndent sehen (und kein neuer def),
+            // dann ist die Funktion zuende
+            if (currentIndent <= funcIndent && !line.empty() && !regex_search(line, defRegex)) {
+                if (functionRelevant) {
+                    CodeBlock cb;
+                    cb.filename = filename;
+                    cb.content = "##########\n" + filename + "\n##########\n" +
+                        currentFunc.str();
+                    funcBlocks.push_back(cb);
+                }
+                insideFunc = false;
+                currentFunc.str("");
+                currentFunc.clear();
+                functionRelevant = false;
+            }
+            else {
+                // wir sind weiter in der Funktion
+                currentFunc << line << "\n";
+            }
+        }
+
+        // check if param in an if/elif
+        smatch m;
+        if (regex_search(line, m, ifParamRegex)) {
+            // If-Block
+            int ifIndent = getIndent(line);
+            ostringstream blockContent;
+            blockContent << line << "\n";
+
+            size_t j = i + 1;
+            for (; j < lines.size(); ++j) {
+                int indentJ = getIndent(lines[j]);
+                if (lines[j].empty()) {
+                    if (indentJ < ifIndent) {
+                        break;
+                    }
+                    blockContent << lines[j] << "\n";
+                }
+                else {
+                    if (indentJ <= ifIndent) {
+                        break;
+                    }
+                    blockContent << lines[j] << "\n";
+                }
+            }
+            CodeBlock cb;
+            cb.filename = filename;
+            cb.content = "##########\n" + filename + "\n##########\n" +
+                blockContent.str();
+            ifBlocks.push_back(cb);
+
+            // falls wir in einer Funktion sind -> relevant
+            if (insideFunc) {
+                functionRelevant = true;
+            }
+            // i hochsetzen
+            i = j - 1;
+        }
+    }
+
+    // Falls Dateiende, aber insideFunc = true
+    if (insideFunc && functionRelevant) {
+        CodeBlock cb;
+        cb.filename = filename;
+        cb.content = "##########\n" + filename + "\n##########\n" +
+            currentFunc.str();
+        funcBlocks.push_back(cb);
+    }
+
+    return make_pair(ifBlocks, funcBlocks);
+}
+
+// worker for python
+void parsePythonWorker(const vector<string>& files,
+    size_t from,
+    size_t to,
+    const string& param,
+    atomic<size_t>& processed,
+    size_t totalLines,
+    ParseResult& result)
+{
+    for (size_t i = from; i < to; ++i) {
+        const auto& filename = files[i];
+        size_t lineCount = 0;
+        auto pr = parsePythonFileSinglePass(filename, param, processed, totalLines, lineCount);
+        result.defineBlocks.insert(result.defineBlocks.end(),
+            pr.first.begin(), pr.first.end());
+        result.functionBlocks.insert(result.functionBlocks.end(),
+            pr.second.begin(), pr.second.end());
+        printProgress(processed.load(), totalLines);
+    }
+}
+
+pair<vector<CodeBlock>, vector<CodeBlock>>
+parsePythonAllFilesMultiThread(const vector<string>& pyFiles, const string& param)
+{
+    // Count lines quickly
+    size_t totalLines = 0;
+    for (auto& f : pyFiles) {
+        ifstream ifs(f);
+        if (!ifs.is_open()) continue;
+        string tmp;
+        while (getline(ifs, tmp)) {
+            totalLines++;
+        }
+    }
+
+    cout << "Gesamt: " << totalLines << " Python-Zeilen.\n";
+
+    unsigned int hwThreads = thread::hardware_concurrency();
+    if (hwThreads == 0) hwThreads = 2;
+    size_t numThreads = std::min<size_t>(hwThreads, pyFiles.size());
+    cout << "Starte " << numThreads << " Thread(s) (Python)...\n";
+
+    vector<ParseResult> partialResults(numThreads);
+    vector<thread> threads;
+    atomic<size_t> processed{ 0 };
+    size_t chunkSize = (pyFiles.size() + numThreads - 1) / numThreads;
+
+    auto startTime = high_resolution_clock::now();
+    for (size_t t = 0; t < numThreads; ++t) {
+        size_t from = t * chunkSize;
+        if (from >= pyFiles.size()) break;
+        size_t to = std::min<size_t>(from + chunkSize, pyFiles.size());
+        threads.emplace_back(parsePythonWorker,
+            cref(pyFiles),
+            from,
+            to,
+            cref(param),
+            ref(processed),
+            totalLines,
+            ref(partialResults[t]));
+    }
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    vector<CodeBlock> allIfBlocks;
+    vector<CodeBlock> allFuncBlocks;
+    for (auto& pr : partialResults) {
+        allIfBlocks.insert(allIfBlocks.end(),
+            pr.defineBlocks.begin(), pr.defineBlocks.end());
+        allFuncBlocks.insert(allFuncBlocks.end(),
+            pr.functionBlocks.begin(), pr.functionBlocks.end());
+    }
+    printProgress(totalLines, totalLines);
+    cout << "\n";
+
+    auto endTime = high_resolution_clock::now();
+    auto ms = duration_cast<milliseconds>(endTime - startTime).count();
+    cout << "Parsing (app." << param << ") fertig in " << ms << " ms\n";
+
+    return make_pair(allIfBlocks, allFuncBlocks);
+}
+
+// sammle alle param aus if/elif app.xyz
+unordered_set<string> collectPythonParameters(const vector<string>& pyFiles) {
+    unordered_set<string> params;
+    for (auto& f : pyFiles) {
+        ifstream ifs(f);
+        if (!ifs.is_open()) continue;
+        string line;
+        while (getline(ifs, line)) {
+            smatch m;
+            if (regex_search(line, m, pythonIfAppRegex)) {
+                if (m.size() > 1) {
+                    params.insert(m[1].str());
+                }
+            }
+        }
+    }
+    return params;
+}
+
+// -----------------------------------------------------
+// MAIN + Menu
+// -----------------------------------------------------
+int main() {
+    fs::path startPath = fs::current_path();
+
+    bool hasClientHeader = false;
+    bool hasServerHeader = false;
+
+    std::string clientHeaderName;
+    std::string serverHeaderName;
+
+    // Hier speichern wir nun alle gefundenen "root"-Ordner,
+    // damit wir dem Benutzer ein Auswahl-Menü anbieten können,
+    // wenn mehr als einer existiert.
+    vector<string> possiblePythonRoots;
+
+    // Rekursive Suche
+    for (auto& p : fs::recursive_directory_iterator(startPath)) {
+        if (fs::is_regular_file(p)) {
+            std::string fn = p.path().filename().string();
+            std::string lower = fn;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+            if (lower == "locale_inc.h") {
+                hasClientHeader = true;
+                // Wichtigen, vollständigen Pfad speichern
+                clientHeaderName = p.path().string();
+            }
+            if (lower == "service.h" || lower == "commondefines.h") {
+                hasServerHeader = true;
+                // Ebenfalls vollständigen Pfad speichern
+                serverHeaderName = p.path().string();
+            }
+        }
+
+        // Prüfe, ob wir einen "root"-Ordner haben
+        if (fs::is_directory(p) && p.path().filename() == "root") {
+            possiblePythonRoots.push_back(p.path().string());
+        }
+    }
+
+    // Nun entscheiden wir, ob und welches root-Verzeichnis genutzt wird
+    bool hasPythonRoot = !possiblePythonRoots.empty();
+    std::string pythonRoot;  // bleibt leer bis Auswahl getroffen ist
+
+    if (hasPythonRoot) {
+        // Falls nur ein root gefunden wurde, direkt übernehmen
+        if (possiblePythonRoots.size() == 1) {
+            pythonRoot = possiblePythonRoots[0];
+        }
+        // Falls mehrere vorhanden, Menüauswahl
+        else {
+            cout << "Es wurden mehrere 'root'-Verzeichnisse gefunden:\n";
+            for (size_t i = 0; i < possiblePythonRoots.size(); ++i) {
+                cout << (i + 1) << ". " << possiblePythonRoots[i] << "\n";
+            }
+            cout << "\nBitte wählen Sie eines aus (1-" << possiblePythonRoots.size() << "): ";
+            int selection = 0;
+            cin >> selection;
+
+            // Grundlegende Validierung der Eingabe
+            while (!cin || selection < 1 || selection >(int)possiblePythonRoots.size()) {
+                cin.clear();
+                cin.ignore(10000, '\n');
+                cout << "Ungültige Eingabe! Bitte erneut wählen (1-"
+                    << possiblePythonRoots.size() << "): ";
+                cin >> selection;
+            }
+            pythonRoot = possiblePythonRoots[selection - 1];
+        }
+    }
 
     while (true) {
-        cout << "\n#############################\n"
-            << "#        Define Parser      #\n"
-            << "#############################\n"
-            << "Available #defines:\n";
+        cout << "\n================================\n"
+            << "    H A U P T -  M E N U E     \n"
+            << "================================\n";
 
-        for (size_t i = 0; i < defines.size(); ++i) {
-            cout << (i + 1) << ". " << defines[i] << "\n";
-        }
-        cout << "0. Exit\nYour choice: ";
-
+        // 1. Client
+        setColor(hasClientHeader ? 10 : 12);
+        cout << "1. Client\n";
+        // 2. Server
+        setColor(hasServerHeader ? 10 : 12);
+        cout << "2. Server\n";
+        // 3. Python
+        setColor(hasPythonRoot ? 10 : 12);
+        cout << "3. Python\n";
+        // 0. Exit
+        setColor(7);
+        cout << "0. Exit\n";
+        cout << "Choice: ";
         int choice;
         cin >> choice;
         if (!cin || choice == 0) {
             break;
         }
-        if (choice < 0 || choice >(int)defines.size()) {
-            cerr << "Ungueltige Auswahl\n";
-            continue;
+
+        // ----------------------------------------
+        // A) Client
+        // ----------------------------------------
+        if (choice == 1) {
+            if (!hasClientHeader) {
+                cerr << "Kein Client-Header (locale_inc.h) gefunden!\n";
+                continue;
+            }
+            // lies #defines
+            auto defines = readDefines(clientHeaderName);
+            if (defines.empty()) {
+                cerr << "Keine #define-Eintraege in " << clientHeaderName << "!\n";
+                continue;
+            }
+            // suche c++ dateien
+            auto sourceFiles = findSourceFiles();
+            if (sourceFiles.empty()) {
+                cerr << "Keine .cpp/.h-Dateien gefunden.\n";
+                continue;
+            }
+
+            // jetzt Menü für die defines
+            while (true) {
+                cout << "\nCLIENT-Header: " << clientHeaderName << "\n";
+                cout << "Gefundene #defines:\n";
+                for (size_t i = 0; i < defines.size(); ++i) {
+                    cout << (i + 1) << ". " << defines[i] << "\n";
+                }
+                cout << "0. Zurueck\nWahl: ";
+                int dchoice;
+                cin >> dchoice;
+                if (!cin || dchoice == 0) {
+                    break;
+                }
+                if (dchoice < 0 || dchoice >(int)defines.size()) {
+                    cerr << "Ungueltige Auswahl\n";
+                    continue;
+                }
+                string def = defines[dchoice - 1];
+                auto results = parseAllFilesMultiThread(sourceFiles, def);
+                auto& allDefineBlocks = results.first;
+                auto& allFunctionBlocks = results.second;
+
+                fs::create_directory("Output");
+                // Write output
+                {
+                    ostringstream fname;
+                    fname << "Output/CLIENT_" << def << "_DEFINE.txt";
+                    ofstream outDef(fname.str());
+                    unordered_set<string> defFiles;
+                    for (auto& b : allDefineBlocks) {
+                        outDef << b.content << "\n";
+                        defFiles.insert(b.filename);
+                    }
+                    outDef << "\n--- SUMMARY (" << allDefineBlocks.size()
+                        << " DEFINE-Block/Bloecke) in Dateien: ---\n";
+                    for (auto& fn : defFiles) {
+                        outDef << fn << "\n";
+                    }
+                }
+                {
+                    ostringstream fname;
+                    fname << "Output/CLIENT_" << def << "_FUNC.txt";
+                    ofstream outFunc(fname.str());
+                    unordered_set<string> funcFiles;
+                    for (auto& b : allFunctionBlocks) {
+                        outFunc << b.content << "\n";
+                        funcFiles.insert(b.filename);
+                    }
+                    outFunc << "\n--- SUMMARY (" << allFunctionBlocks.size()
+                        << " Funktions-Block/Bloecke) in Dateien: ---\n";
+                    for (auto& fn : funcFiles) {
+                        outFunc << fn << "\n";
+                    }
+                }
+                setColor(10);
+                cout << "Fertig fuer define '" << def << "'\n";
+                setColor(7);
+            }
         }
-
-        string define = defines[choice - 1];
-
-        // Parse with multiple threads
-        auto results = parseAllFilesMultiThread(files, define);
-        auto& allDefineBlocks = results.first;
-        auto& allFunctionBlocks = results.second;
-
-        // Write to output files
-        {
-            ofstream outDef("Output/" + prefix + define + "_DEFINE.txt");
-            unordered_set<string> defFiles;
-            for (auto& b : allDefineBlocks) {
-                outDef << b.content << "\n";
-                defFiles.insert(b.filename);
+        // ----------------------------------------
+        // B) Server
+        // ----------------------------------------
+        else if (choice == 2) {
+            if (!hasServerHeader) {
+                cerr << "Kein Server-Header (service.h/commondefines.h) gefunden!\n";
+                continue;
             }
-            outDef << "\n--- SUMMARY (" << allDefineBlocks.size()
-                << " DEFINE-Block/Bloecke) in Dateien: ---\n";
-            for (auto& fn : defFiles) {
-                outDef << fn << "\n";
+            auto defines = readDefines(serverHeaderName);
+            if (defines.empty()) {
+                cerr << "Keine #define-Eintraege in " << serverHeaderName << "!\n";
+                continue;
+            }
+            auto sourceFiles = findSourceFiles();
+            if (sourceFiles.empty()) {
+                cerr << "Keine .cpp/.h-Dateien gefunden.\n";
+                continue;
+            }
+            while (true) {
+                cout << "\nSERVER-Header: " << serverHeaderName << "\n";
+                cout << "Gefundene #defines:\n";
+                for (size_t i = 0; i < defines.size(); ++i) {
+                    cout << (i + 1) << ". " << defines[i] << "\n";
+                }
+                cout << "0. Zurueck\nWahl: ";
+                int dchoice;
+                cin >> dchoice;
+                if (!cin || dchoice == 0) {
+                    break;
+                }
+                if (dchoice < 0 || dchoice >(int)defines.size()) {
+                    cerr << "Ungueltige Auswahl\n";
+                    continue;
+                }
+                string def = defines[dchoice - 1];
+                auto results = parseAllFilesMultiThread(sourceFiles, def);
+                auto& allDefineBlocks = results.first;
+                auto& allFunctionBlocks = results.second;
+
+                fs::create_directory("Output");
+                {
+                    ostringstream fname;
+                    fname << "Output/SERVER_" << def << "_DEFINE.txt";
+                    ofstream outDef(fname.str());
+                    unordered_set<string> defFiles;
+                    for (auto& b : allDefineBlocks) {
+                        outDef << b.content << "\n";
+                        defFiles.insert(b.filename);
+                    }
+                    outDef << "\n--- SUMMARY (" << allDefineBlocks.size()
+                        << " DEFINE-Block/Bloecke) in Dateien: ---\n";
+                    for (auto& fn : defFiles) {
+                        outDef << fn << "\n";
+                    }
+                }
+                {
+                    ostringstream fname;
+                    fname << "Output/SERVER_" << def << "_FUNC.txt";
+                    ofstream outFunc(fname.str());
+                    unordered_set<string> funcFiles;
+                    for (auto& b : allFunctionBlocks) {
+                        outFunc << b.content << "\n";
+                        funcFiles.insert(b.filename);
+                    }
+                    outFunc << "\n--- SUMMARY (" << allFunctionBlocks.size()
+                        << " Funktions-Block/Bloecke) in Dateien: ---\n";
+                    for (auto& fn : funcFiles) {
+                        outFunc << fn << "\n";
+                    }
+                }
+                setColor(10);
+                cout << "Fertig fuer define '" << def << "'\n";
+                setColor(7);
             }
         }
-        {
-            ofstream outFunc("Output/" + prefix + define + "_FUNC.txt");
-            unordered_set<string> funcFiles;
-            for (auto& b : allFunctionBlocks) {
-                outFunc << b.content << "\n";
-                funcFiles.insert(b.filename);
+        // ----------------------------------------
+        // C) Python
+        // ----------------------------------------
+        else if (choice == 3) {
+            if (!hasPythonRoot) {
+                cerr << "python_root Ordner nicht gefunden!\n";
+                continue;
             }
-            outFunc << "\n--- SUMMARY (" << allFunctionBlocks.size()
-                << " Funktions-Block/Bloecke) in Dateien: ---\n";
-            for (auto& fn : funcFiles) {
-                outFunc << fn << "\n";
+
+            // Ermittle alle .py in pythonRoot (rekursiv)
+            vector<string> pyFiles;
+            for (auto& p : fs::recursive_directory_iterator(pythonRoot)) {
+                if (!fs::is_regular_file(p)) continue;
+                if (p.path().extension() == ".py") {
+                    pyFiles.push_back(p.path().string());
+                }
+            }
+            if (pyFiles.empty()) {
+                cerr << "Keine .py-Dateien in " << pythonRoot << "\n";
+                continue;
+            }
+            // Sammle Parameter
+            auto paramSet = collectPythonParameters(pyFiles);
+            if (paramSet.empty()) {
+                cerr << "Keine 'if app.xyz' in python_root gefunden!\n";
+                continue;
+            }
+            vector<string> params(paramSet.begin(), paramSet.end());
+            sort(params.begin(), params.end());
+
+            // Untermenü: Parameter wählen
+            while (true) {
+                cout << "\nPython-Parameter im Ordner " << pythonRoot << ":\n";
+                for (size_t i = 0; i < params.size(); ++i) {
+                    cout << (i + 1) << ". " << params[i] << "\n";
+                }
+                cout << "0. Zurueck\nWahl: ";
+                int pchoice;
+                cin >> pchoice;
+                if (!cin || pchoice == 0) {
+                    break;
+                }
+                if (pchoice < 0 || pchoice >(int)params.size()) {
+                    cerr << "Ungueltige Auswahl\n";
+                    continue;
+                }
+                string chosenParam = params[pchoice - 1];
+
+                // parse + ausgabe
+                auto pyResults = parsePythonAllFilesMultiThread(pyFiles, chosenParam);
+                auto& ifBlocks = pyResults.first;
+                auto& funcBlocks = pyResults.second;
+
+                fs::create_directory("Output");
+                // "If-Blöcke" analog "DEFINE"
+                {
+                    ostringstream fname;
+                    fname << "Output/PYTHON_" << chosenParam << "_DEFINE.txt";
+                    ofstream out(fname.str());
+                    unordered_set<string> defFiles;
+                    for (auto& b : ifBlocks) {
+                        out << b.content << "\n";
+                        defFiles.insert(b.filename);
+                    }
+                    out << "\n--- SUMMARY (" << ifBlocks.size()
+                        << " If-Block/Bloecke) in Dateien: ---\n";
+                    for (auto& fn : defFiles) {
+                        out << fn << "\n";
+                    }
+                }
+                // "Funktions-Blöcke"
+                {
+                    ostringstream fname;
+                    fname << "Output/PYTHON_" << chosenParam << "_FUNC.txt";
+                    ofstream out(fname.str());
+                    unordered_set<string> funcFiles;
+                    for (auto& b : funcBlocks) {
+                        out << b.content << "\n";
+                        funcFiles.insert(b.filename);
+                    }
+                    out << "\n--- SUMMARY (" << funcBlocks.size()
+                        << " Funktions-Block/Bloecke) in Dateien: ---\n";
+                    for (auto& fn : funcFiles) {
+                        out << fn << "\n";
+                    }
+                }
+                setColor(10);
+                cout << "Fertig fuer app." << chosenParam << "\n";
+                setColor(7);
             }
         }
-
-        // Short console summary
-        setColor(10);
-        unordered_set<string> combined;
-        for (auto& b : allDefineBlocks)   combined.insert(b.filename);
-        for (auto& b : allFunctionBlocks) combined.insert(b.filename);
-
-        cout << "Gefunden: "
-            << allDefineBlocks.size() << " Define-Block/Bloecke und "
-            << allFunctionBlocks.size() << " Funktions-Bloecke.\n";
-        cout << "  In insgesamt " << combined.size() << " Datei(en)\n";
-        setColor(7);
+        else {
+            cerr << "Unbekannte Auswahl!\n";
+        }
     }
-}
-
-// -----------------------------------------------------
-// main()
-// -----------------------------------------------------
-int main() {
-    bool isClient = false;
-    string headerFile = findHeaderFile(isClient);
-    if (headerFile.empty()) {
-        return 1;
-    }
-
-    auto defines = readDefines(headerFile);
-    if (defines.empty()) {
-        cerr << "Keine #define-Eintraege im Header gefunden!\n";
-        return 2;
-    }
-
-    auto sourceFiles = findSourceFiles();
-    if (sourceFiles.empty()) {
-        cerr << "Keine .cpp/.h-Dateien gefunden.\n";
-        return 3;
-    }
-
-    showMenu(defines, sourceFiles, isClient);
 
     return 0;
 }
