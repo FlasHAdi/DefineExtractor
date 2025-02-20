@@ -27,7 +27,6 @@ namespace fs = std::experimental::filesystem;
 #error "No filesystem support detected"
 #endif
 
-using namespace std;
 using namespace std::chrono;
 
 static std::mutex consoleMutex;
@@ -35,6 +34,12 @@ static std::mutex consoleMutex;
 /***********************************************
  * FARBSUPPORT (Konsole)
  ***********************************************/
+
+ /**
+  * Setzt die Textfarbe in der Konsole.
+  * @param color Farbcode. Unter Windows entsprechend der WinAPI-Farbwerte,
+  *              unter Unix wird ein ANSI-Escape-Code ausgegeben.
+  */
 #ifdef _WIN32
 void setColor(int color) {
     SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), color);
@@ -49,6 +54,13 @@ void setColor(int color) {
 /***********************************************
  * PROGRESS ANZEIGE
  ***********************************************/
+
+ /**
+  * Zeigt einen Fortschrittsbalken (Progress-Bar) in der Konsole an.
+  * @param current Aktueller Fortschritt (z.B. Anzahl bearbeiteter Zeilen).
+  * @param total Gesamtmenge (z.B. Gesamtanzahl Zeilen).
+  * @param width Breite des Fortschrittsbalkens in Zeichen.
+  */
 void printProgress(size_t current, size_t total, int width = 50) {
     static auto lastUpdate = high_resolution_clock::now();
     auto now = high_resolution_clock::now();
@@ -62,31 +74,32 @@ void printProgress(size_t current, size_t total, int width = 50) {
     float ratio = float(current) / float(total);
     int c = int(ratio * width);
 
-    lock_guard<mutex> lock(consoleMutex);
-    cout << "[";
+    std::lock_guard<std::mutex> lock(consoleMutex);
+    std::cout << "[";
     for (int i = 0; i < width; ++i) {
-        if (i < c) cout << "#";
-        else       cout << " ";
+        if (i < c) std::cout << "#";
+        else       std::cout << " ";
     }
-    cout << "] " << (int)(ratio * 100.0f) << " %\r" << flush;
+    std::cout << "] " << (int)(ratio * 100.0f) << " %\r" << std::flush;
 }
 
 /***********************************************
  * DATA STRUCTURES
  ***********************************************/
 struct CodeBlock {
-    string filename;
-    string content;
+    std::string filename;
+    std::string content;
 };
 
 struct ParseResult {
-    vector<CodeBlock> defineBlocks;
-    vector<CodeBlock> functionBlocks;
+    std::vector<CodeBlock> defineBlocks;
+    std::vector<CodeBlock> functionBlocks;
 };
 
 /***********************************************
  * GLOBALE (oder statische) HELFER FÜR LINIENZÄHLUNG
  ***********************************************/
+
  // Cache für bereits ermittelte Zeilenanzahlen
 static std::mutex lineCountCacheMutex;
 static std::unordered_map<std::string, size_t> lineCountCache;
@@ -94,37 +107,35 @@ static std::unordered_map<std::string, size_t> lineCountCache;
 /**
  * Ermittelt einmalig die Anzahl Zeilen in filename.
  * Falls bereits im Cache vorhanden, wird der gespeicherte Wert zurückgegeben.
+ * @param filename Name der Datei, deren Zeilenanzahl ermittelt werden soll.
+ * @return Anzahl der Zeilen in der Datei (0 falls Datei nicht vorhanden).
  */
-size_t getFileLineCount(const string& filename)
+size_t getFileLineCount(const std::string& filename)
 {
     {
-        // Zuerst schauen wir ohne Lock, aber trotzdem safe in C++17/20?
-        // Zur Sicherheit oder bei älteren C++ Versionen: Lock benutzen.
-        lock_guard<mutex> lk(lineCountCacheMutex);
+        std::lock_guard<std::mutex> lk(lineCountCacheMutex);
         auto it = lineCountCache.find(filename);
         if (it != lineCountCache.end()) {
             return it->second;
         }
     }
 
-    // Nicht gefunden: Datei einmalig öffnen und zählen
-    ifstream ifs(filename);
+    std::ifstream ifs(filename);
     if (!ifs.is_open()) {
         // Datei nicht vorhanden?
-        // Speichere 0 im Cache und return 0.
-        lock_guard<mutex> lk(lineCountCacheMutex);
+        std::lock_guard<std::mutex> lk(lineCountCacheMutex);
         lineCountCache[filename] = 0;
         return 0;
     }
 
     size_t count = 0;
-    string tmp;
+    std::string tmp;
     while (getline(ifs, tmp)) {
         count++;
     }
 
     {
-        lock_guard<mutex> lk(lineCountCacheMutex);
+        std::lock_guard<std::mutex> lk(lineCountCacheMutex);
         lineCountCache[filename] = count;
     }
 
@@ -133,8 +144,10 @@ size_t getFileLineCount(const string& filename)
 
 /**
  * Summiert die Zeilenzahl aller Dateien, unter Verwendung des obigen Caches.
+ * @param files Liste von Dateinamen.
+ * @return Gesamtanzahl Zeilen über alle Dateien.
  */
-size_t getTotalLineCount(const vector<string>& files)
+size_t getTotalLineCount(const std::vector<std::string>& files)
 {
     size_t total = 0;
     for (auto& f : files) {
@@ -146,14 +159,21 @@ size_t getTotalLineCount(const vector<string>& files)
 /***********************************************
  * TEIL A: C++-Parsing (#if define, function-blocks)
  ***********************************************/
-static const regex endifRegex(R"(^\s*#\s*endif\b)",
-    regex_constants::ECMAScript | regex_constants::optimize);
+static const std::regex endifRegex(R"(^\s*#\s*endif\b)",
+    std::regex_constants::ECMAScript | std::regex_constants::optimize);
 
-static const regex anyIfStartRegex(R"(^\s*#\s*(if|ifdef|ifndef)\b)",
-    regex_constants::ECMAScript | regex_constants::optimize);
+static const std::regex anyIfStartRegex(R"(^\s*#\s*(if|ifdef|ifndef)\b)",
+    std::regex_constants::ECMAScript | std::regex_constants::optimize);
 
-regex createConditionalRegex(const string& define) {
-    ostringstream pattern;
+/**
+ * Erzeugt einen Regex-Ausdruck, der verschiedene Varianten von if-defines
+ * für den gewünschten Parameter (z.B. #ifdef DEFINE, #if defined(DEFINE) etc.)
+ * abdeckt.
+ * @param define Der zu suchende define-Name.
+ * @return Ein std::regex, der die entsprechenden Zeilen erkennt.
+ */
+std::regex createConditionalRegex(const std::string& define) {
+    std::ostringstream pattern;
     pattern
         << R"((^\s*#(ifdef|ifndef)\s+)" << define << R"(\b))"
         << R"(|)"
@@ -162,57 +182,58 @@ regex createConditionalRegex(const string& define) {
         << R"((^\s*#(if|elif)\s+defined\s+)" << define << R"())"
         << R"(|)"
         << R"((^\s*#(if|elif)\s+\(?\s*)" << define << R"(\s*\)?))";
-    return regex(pattern.str(), regex_constants::ECMAScript | regex_constants::optimize);
+    return std::regex(pattern.str(), std::regex_constants::ECMAScript | std::regex_constants::optimize);
 }
 
-static const regex functionHeadRegex(
+static const std::regex functionHeadRegex(
     R"(^\s*(?:inline\s+|static\s+|virtual\s+|constexpr\s+|friend\s+|typename\s+|[\w:\*&<>]+\s+)*[\w:\*&<>]+\s+\w[\w:\*&<>]*\s*\([^)]*\)\s*(\{|;|$))",
-    regex_constants::ECMAScript | regex_constants::optimize
+    std::regex_constants::ECMAScript | std::regex_constants::optimize
 );
 
 /**
  * Parst eine einzelne Datei (C++/Header) auf #if-define-Blöcke und Funktionsblöcke.
- * filename: Datei
- * startDefineRegex: spezieller Regex für das gewählte #define
- * processed: Atomarer Zähler für Fortschritt
- * totalLines: Gesamtanzahl Zeilen aller Dateien
- * outLineCount: wird hochgezählt um die Zahl der gelesenen Zeilen dieser Datei
+ * @param filename Datei, die untersucht wird.
+ * @param startDefineRegex Spezieller Regex für das gewählte #define.
+ * @param processed Atomarer Zähler für bereits gelesene Zeilen (Fortschritt).
+ * @param totalLines Gesamtanzahl Zeilen aller zu untersuchenden Dateien.
+ * @param outLineCount Gibt die Anzahl gelesener Zeilen für diese Datei zurück.
+ * @return Ein Paar aus (Liste von CodeBlöcken mit #if-define, Liste von CodeBlöcken mit Funktionsblöcken).
  */
-pair<vector<CodeBlock>, vector<CodeBlock>>
-parseFileSinglePass(const string& filename,
-    const regex& startDefineRegex,
-    atomic<size_t>& processed,
+std::pair<std::vector<CodeBlock>, std::vector<CodeBlock>>
+parseFileSinglePass(const std::string& filename,
+    const std::regex& startDefineRegex,
+    std::atomic<size_t>& processed,
     size_t totalLines,
     size_t& outLineCount)
 {
-    vector<CodeBlock> defineBlocks;
-    vector<CodeBlock> functionBlocks;
+    std::vector<CodeBlock> defineBlocks;
+    std::vector<CodeBlock> functionBlocks;
 
-    ifstream ifs(filename);
+    std::ifstream ifs(filename);
     if (!ifs.is_open()) {
         return make_pair(defineBlocks, functionBlocks);
     }
 
     bool insideDefineBlock = false;
     int  defineNesting = 0;
-    ostringstream currentDefineBlock;
+    std::ostringstream currentDefineBlock;
 
     bool inFunction = false;
     int braceCount = 0;
     bool functionRelevant = false;
-    ostringstream currentFunc;
+    std::ostringstream currentFunc;
 
     bool potentialFunctionHead = false;
-    ostringstream potentialHeadBuffer;
+    std::ostringstream potentialHeadBuffer;
 
-    string line;
+    std::string line;
     while (true) {
         if (!getline(ifs, line)) {
             break;
         }
         outLineCount++;
 
-        size_t oldVal = processed.fetch_add(1, memory_order_relaxed);
+        size_t oldVal = processed.fetch_add(1, std::memory_order_relaxed);
         if ((oldVal + 1) % 200 == 0) {
             printProgress(oldVal + 1, totalLines);
         }
@@ -249,16 +270,16 @@ parseFileSinglePass(const string& filename,
         }
 
         // Function-block logic
-        bool lineHasBraceOrParen = (line.find('{') != string::npos ||
-            line.find('}') != string::npos ||
-            line.find('(') != string::npos);
+        bool lineHasBraceOrParen = (line.find('{') != std::string::npos ||
+            line.find('}') != std::string::npos ||
+            line.find('(') != std::string::npos);
         bool lineMatchesDefine = regex_search(line, startDefineRegex);
 
         if (!inFunction) {
             if (potentialFunctionHead) {
                 potentialHeadBuffer << "\n" << line;
-                bool hasOpenBrace = (line.find('{') != string::npos);
-                bool hasSemicolon = (line.find(';') != string::npos);
+                bool hasOpenBrace = (line.find('{') != std::string::npos);
+                bool hasSemicolon = (line.find(';') != std::string::npos);
 
                 if (hasOpenBrace) {
                     inFunction = true;
@@ -284,9 +305,9 @@ parseFileSinglePass(const string& filename,
                 }
             }
             else {
-                smatch match;
+                std::smatch match;
                 if (regex_search(line, match, functionHeadRegex)) {
-                    string trailingSymbol = match[1].str();
+                    std::string trailingSymbol = match[1].str();
                     if (trailingSymbol == "{") {
                         inFunction = true;
                         braceCount = 0;
@@ -351,14 +372,19 @@ parseFileSinglePass(const string& filename,
 /***********************************************
  * TEIL B: PYTHON-Parsen
  ***********************************************/
-static const regex pythonIfAppRegex(
+static const std::regex pythonIfAppRegex(
     R"((?:if|elif)\s*\(?\s*app\.(\w+))",
-    regex_constants::ECMAScript | regex_constants::optimize);
+    std::regex_constants::ECMAScript | std::regex_constants::optimize);
 
-static const regex defRegex(R"(^\s*def\s+[\w_]+)");
+static const std::regex defRegex(R"(^\s*def\s+[\w_]+)");
 
-// naive Indentation-Hilfsfunktion
-int getIndent(const string& ln) {
+/**
+ * Naive Hilfsfunktion zur Ermittlung der Einrückung (Indentation).
+ * Wandelt Tabs in 4 Spaces um, was in der Praxis fehleranfällig sein kann.
+ * @param ln Zu analysierende Zeile.
+ * @return Geschätzte Einrückungs-Tiefe (Anzahl Spaces).
+ */
+int getIndent(const std::string& ln) {
     int count = 0;
     for (char c : ln) {
         if (c == ' ') count++;
@@ -370,42 +396,49 @@ int getIndent(const string& ln) {
 
 /**
  * Parst eine einzelne Python-Datei zeilenweise (ohne alles vorher einzulesen).
- * Sucht nach `if app.<param>` Blöcken + Funktionen (`def`) und ermittelt Funktions-Relevanz.
+ * Sucht nach `if app.<param>` Blöcken und Funktionen (`def`) und ermittelt,
+ * ob eine Funktion durch einen solchen if-Block "relevant" wird.
+ * @param filename Name der Python-Datei.
+ * @param param Der Parameter (z.B. "xyz" in "if app.xyz").
+ * @param processed Atomarer Zähler für Fortschritt (gelesene Zeilen).
+ * @param totalLines Gesamtzahl Zeilen in allen .py-Dateien.
+ * @param outLineCount Anzahl gelesener Zeilen dieser Datei.
+ * @return Ein Paar: (Liste gefundener if app.-Blöcke, Liste relevanter Funktionsblöcke).
  */
-pair<vector<CodeBlock>, vector<CodeBlock>>
-parsePythonFileSinglePass(const string& filename,
-    const string& param,
-    atomic<size_t>& processed,
+std::pair<std::vector<CodeBlock>, std::vector<CodeBlock>>
+parsePythonFileSinglePass(const std::string& filename,
+    const std::string& param,
+    std::atomic<size_t>& processed,
     size_t totalLines,
     size_t& outLineCount)
 {
-    vector<CodeBlock> ifBlocks;
-    vector<CodeBlock> funcBlocks;
+    std::vector<CodeBlock> ifBlocks;
+    std::vector<CodeBlock> funcBlocks;
 
-    ifstream ifs(filename);
+    std::ifstream ifs(filename);
     if (!ifs.is_open()) {
         return make_pair(ifBlocks, funcBlocks);
     }
 
     // build param-regex
-    ostringstream oss;
+    std::ostringstream oss;
     oss << R"((?:if|elif)\s*\(?\s*app\.)" << param << R"(\b)";
-    regex ifParamRegex(oss.str(), regex_constants::ECMAScript | regex_constants::optimize);
+    std::regex ifParamRegex(oss.str(), std::regex_constants::ECMAScript | std::regex_constants::optimize);
 
     bool insideFunc = false;
     int funcIndent = 0;
     bool functionRelevant = false;
-    ostringstream currentFunc;
+    std::ostringstream currentFunc;
 
-    string line;
+    std::string line;
     while (true) {
-        streampos currentPos = ifs.tellg();
+        std::streampos currentPos = ifs.tellg();
         if (!getline(ifs, line)) {
             break;
         }
         outLineCount++;
 
-        size_t oldVal = processed.fetch_add(1, memory_order_relaxed);
+        size_t oldVal = processed.fetch_add(1, std::memory_order_relaxed);
         if ((oldVal + 1) % 200 == 0) {
             printProgress(oldVal + 1, totalLines);
         }
@@ -460,19 +493,19 @@ parsePythonFileSinglePass(const string& filename,
             int ifIndent = getIndent(line);
 
             // Block-Inhalt sammeln
-            ostringstream blockContent;
+            std::ostringstream blockContent;
             blockContent << line << "\n";
 
             // Lese nachfolgende Zeilen, solange Einrückung > ifIndent
             while (true) {
-                streampos pos = ifs.tellg();
-                string nextLine;
+                std::streampos pos = ifs.tellg();
+                std::string nextLine;
                 if (!getline(ifs, nextLine)) {
                     break; // Ende Datei
                 }
                 outLineCount++;
 
-                size_t oldVal2 = processed.fetch_add(1, memory_order_relaxed);
+                size_t oldVal2 = processed.fetch_add(1, std::memory_order_relaxed);
                 if ((oldVal2 + 1) % 200 == 0) {
                     printProgress(oldVal2 + 1, totalLines);
                 }
@@ -515,14 +548,21 @@ parsePythonFileSinglePass(const string& filename,
 /***********************************************
  * SAMMEL-FUNKTION: alle python-Dateien parsen
  ***********************************************/
-unordered_set<string> collectPythonParameters(const vector<string>& pyFiles) {
-    unordered_set<string> params;
+
+ /**
+  * Durchsucht alle angegebenen Python-Dateien nach Zeilen wie `if app.<param>`
+  * und extrahiert dabei alle auftretenden Parameter-Namen.
+  * @param pyFiles Liste mit Pfaden zu Python-Dateien.
+  * @return Menge aller gefundenen Parameter-Namen (z.B. {"xyz", "debug", ...}).
+  */
+std::unordered_set<std::string> collectPythonParameters(const std::vector<std::string>& pyFiles) {
+    std::unordered_set<std::string> params;
     for (auto& f : pyFiles) {
-        ifstream ifs(f);
+        std::ifstream ifs(f);
         if (!ifs.is_open()) continue;
-        string line;
+        std::string line;
         while (getline(ifs, line)) {
-            smatch m;
+            std::smatch m;
             if (regex_search(line, m, pythonIfAppRegex)) {
                 if (m.size() > 1) {
                     params.insert(m[1].str());
@@ -536,21 +576,32 @@ unordered_set<string> collectPythonParameters(const vector<string>& pyFiles) {
 /***********************************************
  * WORKER-FUNKTIONEN für Multi-Threading (C++)
  ***********************************************/
-static atomic<size_t> nextFileIndex{ 0 }; // Für dynamisches Scheduling
 
-void parseWorkerDynamic(const vector<string>& files,
-    const regex& startDefineRegex,
-    atomic<size_t>& processed,
+static std::atomic<size_t> nextFileIndex{ 0 }; // Für dynamisches Scheduling
+
+/**
+ * Worker-Funktion für den Multi-Threaded C++-Parser. Jeder Thread holt sich
+ * mittels nextFileIndex eine Datei und parst diese.
+ * @param files Liste aller zu parsenden Dateien.
+ * @param startDefineRegex Regex, der auf den #define-Parameter abgestimmt ist.
+ * @param processed Atomarer Zähler für gelesene Zeilen.
+ * @param totalLines Gesamtanzahl Zeilen aller Dateien.
+ * @param defineBlocksOut Ausgabe-Liste für gefundene #if-define-Blöcke.
+ * @param functionBlocksOut Ausgabe-Liste für gefundene Funktionsblöcke.
+ */
+void parseWorkerDynamic(const std::vector<std::string>& files,
+    const std::regex& startDefineRegex,
+    std::atomic<size_t>& processed,
     size_t totalLines,
-    vector<CodeBlock>& defineBlocksOut,
-    vector<CodeBlock>& functionBlocksOut)
+    std::vector<CodeBlock>& defineBlocksOut,
+    std::vector<CodeBlock>& functionBlocksOut)
 {
     // Jeder Thread sammelt lokal sein Ergebnis
-    vector<CodeBlock> localDefine;
-    vector<CodeBlock> localFunc;
+    std::vector<CodeBlock> localDefine;
+    std::vector<CodeBlock> localFunc;
 
     while (true) {
-        size_t idx = nextFileIndex.fetch_add(1, memory_order_relaxed);
+        size_t idx = nextFileIndex.fetch_add(1, std::memory_order_relaxed);
         if (idx >= files.size()) {
             break; // Keine Dateien mehr
         }
@@ -568,41 +619,44 @@ void parseWorkerDynamic(const vector<string>& files,
 
     // Thread-sicher die Ergebnisse in die Ausgabe-Vektoren packen
     {
-        lock_guard<mutex> lock(consoleMutex);
+        std::lock_guard<std::mutex> lock(consoleMutex);
         defineBlocksOut.insert(defineBlocksOut.end(), localDefine.begin(), localDefine.end());
         functionBlocksOut.insert(functionBlocksOut.end(), localFunc.begin(), localFunc.end());
     }
 }
 
 /**
- * Parst alle C++-Dateien multithreaded, dynamische Lastverteilung.
+ * Parst alle C++-Dateien multithreaded mit dynamischer Lastverteilung.
+ * @param files Liste aller C++/Header-Dateien.
+ * @param define Zu suchender #define-Parameter.
+ * @return Ein Paar aus (Liste #if-define-Blöcke, Liste Funktionsblöcke).
  */
-pair<vector<CodeBlock>, vector<CodeBlock>>
-parseAllFilesMultiThread(const vector<string>& files, const string& define)
+std::pair<std::vector<CodeBlock>, std::vector<CodeBlock>>
+parseAllFilesMultiThread(const std::vector<std::string>& files, const std::string& define)
 {
     // Erzeuge Regex für definierten Parameter
-    regex startDefineRegex = createConditionalRegex(define);
+    std::regex startDefineRegex = createConditionalRegex(define);
 
     // Gesamte Zeilenzahl ermitteln (jetzt über Cache)
-    cout << "Zaehle Zeilen (ohne doppelte Dateizugriffe) ...\n";
+    std::cout << "Zaehle Zeilen (ohne doppelte Dateizugriffe) ...\n";
     size_t totalLines = getTotalLineCount(files);
-    cout << "Gesamt: " << totalLines << " Zeilen.\n";
+    std::cout << "Gesamt: " << totalLines << " Zeilen.\n";
 
     // Multi-Threading Setup
-    unsigned int hwThreads = thread::hardware_concurrency();
+    unsigned int hwThreads = std::thread::hardware_concurrency();
     if (hwThreads == 0) hwThreads = 2;
     size_t numThreads = std::min<size_t>(hwThreads, files.size());
-    cout << "Starte " << numThreads << " Thread(s)...\n";
+    std::cout << "Starte " << numThreads << " Thread(s)...\n";
 
-    atomic<size_t> processed{ 0 };
+    std::atomic<size_t> processed{ 0 };
     // Ergebnis-Speicher (thread-sicherer Zugriff in parseWorkerDynamic)
-    vector<CodeBlock> allDefineBlocks;
-    vector<CodeBlock> allFunctionBlocks;
+    std::vector<CodeBlock> allDefineBlocks;
+    std::vector<CodeBlock> allFunctionBlocks;
 
     // Index zurücksetzen und Threads starten
     nextFileIndex.store(0);
 
-    vector<thread> threads;
+    std::vector<std::thread> threads;
     auto startTime = high_resolution_clock::now();
     for (size_t t = 0; t < numThreads; ++t) {
         threads.emplace_back(parseWorkerDynamic, cref(files),
@@ -617,11 +671,11 @@ parseAllFilesMultiThread(const vector<string>& files, const string& define)
     }
 
     printProgress(totalLines, totalLines);
-    cout << "\n";
+    std::cout << "\n";
 
     auto endTime = high_resolution_clock::now();
     auto ms = duration_cast<milliseconds>(endTime - startTime).count();
-    cout << "Parsing '" << define << "' fertig in " << ms << " ms\n";
+    std::cout << "Parsing '" << define << "' fertig in " << ms << " ms\n";
 
     return make_pair(allDefineBlocks, allFunctionBlocks);
 }
@@ -629,20 +683,31 @@ parseAllFilesMultiThread(const vector<string>& files, const string& define)
 /***********************************************
  * WORKER-FUNKTIONEN für Multi-Threading (Python)
  ***********************************************/
-static atomic<size_t> nextPyFileIndex{ 0 };
 
-void parsePythonWorkerDynamic(const vector<string>& files,
-    const string& param,
-    atomic<size_t>& processed,
+static std::atomic<size_t> nextPyFileIndex{ 0 };
+
+/**
+ * Worker-Funktion für den Multi-Threaded-Python-Parser. Jeder Thread holt sich
+ * über nextPyFileIndex eine Python-Datei und parst diese.
+ * @param files Liste aller Python-Dateien.
+ * @param param Gesuchter Parameter, z.B. "debug" in `if app.debug`.
+ * @param processed Atomarer Zähler für gelesene Zeilen.
+ * @param totalLines Gesamtanzahl Zeilen aller Python-Dateien.
+ * @param ifBlocksOut Ausgabe-Liste für gefundene `if app.param`-Blöcke.
+ * @param funcBlocksOut Ausgabe-Liste für relevante Funktionsblöcke.
+ */
+void parsePythonWorkerDynamic(const std::vector<std::string>& files,
+    const std::string& param,
+    std::atomic<size_t>& processed,
     size_t totalLines,
-    vector<CodeBlock>& ifBlocksOut,
-    vector<CodeBlock>& funcBlocksOut)
+    std::vector<CodeBlock>& ifBlocksOut,
+    std::vector<CodeBlock>& funcBlocksOut)
 {
-    vector<CodeBlock> localIf;
-    vector<CodeBlock> localFunc;
+    std::vector<CodeBlock> localIf;
+    std::vector<CodeBlock> localFunc;
 
     while (true) {
-        size_t idx = nextPyFileIndex.fetch_add(1, memory_order_relaxed);
+        size_t idx = nextPyFileIndex.fetch_add(1, std::memory_order_relaxed);
         if (idx >= files.size()) {
             break; // Keine Dateien mehr
         }
@@ -657,31 +722,38 @@ void parsePythonWorkerDynamic(const vector<string>& files,
         printProgress(processed.load(), totalLines);
     }
 
-    lock_guard<mutex> lock(consoleMutex);
+    std::lock_guard<std::mutex> lock(consoleMutex);
     ifBlocksOut.insert(ifBlocksOut.end(), localIf.begin(), localIf.end());
     funcBlocksOut.insert(funcBlocksOut.end(), localFunc.begin(), localFunc.end());
 }
 
-pair<vector<CodeBlock>, vector<CodeBlock>>
-parsePythonAllFilesMultiThread(const vector<string>& pyFiles, const string& param)
+/**
+ * Parst alle angegebenen Python-Dateien parallel, sucht nach `if app.param` Blöcken
+ * und erkennt Funktionen, in denen diese Blöcke enthalten sind.
+ * @param pyFiles Liste aller Python-Dateien.
+ * @param param Parameter (z.B. "debug"), der in `if app.debug` gesucht wird.
+ * @return Ein Paar aus (Liste gefundener if-Blöcke, Liste relevanter Funktionsblöcke).
+ */
+std::pair<std::vector<CodeBlock>, std::vector<CodeBlock>>
+parsePythonAllFilesMultiThread(const std::vector<std::string>& pyFiles, const std::string& param)
 {
     // Zähle Zeilen (jetzt aus Cache)
     size_t totalLines = getTotalLineCount(pyFiles);
-    cout << "Gesamt: " << totalLines << " Python-Zeilen.\n";
+    std::cout << "Gesamt: " << totalLines << " Python-Zeilen.\n";
 
-    unsigned int hwThreads = thread::hardware_concurrency();
+    unsigned int hwThreads = std::thread::hardware_concurrency();
     if (hwThreads == 0) hwThreads = 2;
     size_t numThreads = std::min<size_t>(hwThreads, pyFiles.size());
-    cout << "Starte " << numThreads << " Thread(s) (Python)...\n";
+    std::cout << "Starte " << numThreads << " Thread(s) (Python)...\n";
 
-    atomic<size_t> processed{ 0 };
-    vector<CodeBlock> allIfBlocks;
-    vector<CodeBlock> allFuncBlocks;
+    std::atomic<size_t> processed{ 0 };
+    std::vector<CodeBlock> allIfBlocks;
+    std::vector<CodeBlock> allFuncBlocks;
 
     // Index zurücksetzen und Threads starten
     nextPyFileIndex.store(0);
 
-    vector<thread> threads;
+    std::vector<std::thread> threads;
     auto startTime = high_resolution_clock::now();
     for (size_t t = 0; t < numThreads; ++t) {
         threads.emplace_back(parsePythonWorkerDynamic,
@@ -697,11 +769,11 @@ parsePythonAllFilesMultiThread(const vector<string>& pyFiles, const string& para
     }
 
     printProgress(totalLines, totalLines);
-    cout << "\n";
+    std::cout << "\n";
 
     auto endTime = high_resolution_clock::now();
     auto ms = duration_cast<milliseconds>(endTime - startTime).count();
-    cout << "Parsing (app." << param << ") fertig in " << ms << " ms\n";
+    std::cout << "Parsing (app." << param << ") fertig in " << ms << " ms\n";
 
     return make_pair(allIfBlocks, allFuncBlocks);
 }
@@ -709,8 +781,14 @@ parsePythonAllFilesMultiThread(const vector<string>& pyFiles, const string& para
 /***********************************************
  * Hilfsfunktionen
  ***********************************************/
-vector<string> findSourceFiles() {
-    vector<string> result;
+
+ /**
+  * Durchsucht rekursiv das aktuelle Verzeichnis (".") nach Dateien
+  * mit Endung .cpp oder .h.
+  * @return Liste mit Pfaden aller gefundenen C++-Dateien.
+  */
+std::vector<std::string> findSourceFiles() {
+    std::vector<std::string> result;
     for (auto& p : fs::recursive_directory_iterator(".")) {
         if (!fs::is_regular_file(p)) continue;
         auto ext = p.path().extension().string();
@@ -721,18 +799,23 @@ vector<string> findSourceFiles() {
     return result;
 }
 
-vector<string> readDefines(const string& filename) {
-    vector<string> result;
-    ifstream ifs(filename);
+/**
+ * Liest Zeile für Zeile eine Datei ein und sucht nach `#define <TOKEN>`.
+ * @param filename Name der Datei, z.B. ein Headerfile.
+ * @return Liste aller gefundenen define-Namen.
+ */
+std::vector<std::string> readDefines(const std::string& filename) {
+    std::vector<std::string> result;
+    std::ifstream ifs(filename);
     if (!ifs.is_open()) {
-        cerr << "Konnte " << filename << " nicht öffnen!\n";
+        std::cerr << "Konnte " << filename << " nicht öffnen!\n";
         return result;
     }
 
-    static const regex defineRegex(R"(^\s*#\s*define\s+(\w+))");
-    string line;
+    static const std::regex defineRegex(R"(^\s*#\s*define\s+(\w+))");
+    std::string line;
     while (getline(ifs, line)) {
-        smatch m;
+        std::smatch m;
         if (regex_search(line, m, defineRegex)) {
             result.push_back(m[1].str());
         }
@@ -743,6 +826,15 @@ vector<string> readDefines(const string& filename) {
 /***********************************************
  * MAIN + MENÜ
  ***********************************************/
+
+ /**
+  * Hauptprogramm mit einfachem Konsolen-Menü für Client/Server/Python.
+  * Sucht #defines in bestimmten Headern, sowie python_root-Verzeichnis.
+  * Bietet dann die Auswahl an, einen define (C++/Header) oder einen Parameter
+  * (Python) auszuwählen und führt den entsprechenden Parsing-Prozess aus.
+  * Das Ergebnis wird in Output-Dateien geschrieben.
+  * @return 0 bei regulärem Programmende.
+  */
 int main() {
     fs::path startPath = fs::current_path();
 
@@ -753,7 +845,7 @@ int main() {
     std::string serverHeaderName;
 
     // mögliche python-root Verzeichnisse
-    vector<string> possiblePythonRoots;
+    std::vector<std::string> possiblePythonRoots;
 
     // Rekursive Suche
     for (auto& p : fs::recursive_directory_iterator(startPath)) {
@@ -785,84 +877,84 @@ int main() {
             pythonRoot = possiblePythonRoots[0];
         }
         else {
-            cout << "Es wurden mehrere 'root'-Verzeichnisse gefunden:\n";
+            std::cout << "Es wurden mehrere 'root'-Verzeichnisse gefunden:\n";
             for (size_t i = 0; i < possiblePythonRoots.size(); ++i) {
-                cout << (i + 1) << ". " << possiblePythonRoots[i] << "\n";
+                std::cout << (i + 1) << ". " << possiblePythonRoots[i] << "\n";
             }
-            cout << "\nBitte wählen Sie eines aus (1-" << possiblePythonRoots.size() << "): ";
+            std::cout << "\nBitte wählen Sie eines aus (1-" << possiblePythonRoots.size() << "): ";
             int selection = 0;
-            cin >> selection;
-            while (!cin || selection < 1 || selection >(int)possiblePythonRoots.size()) {
-                cin.clear();
-                cin.ignore(10000, '\n');
-                cout << "Ungültige Eingabe! Bitte erneut wählen (1-"
+            std::cin >> selection;
+            while (!std::cin || selection < 1 || selection >(int)possiblePythonRoots.size()) {
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+                std::cout << "Ungültige Eingabe! Bitte erneut wählen (1-"
                     << possiblePythonRoots.size() << "): ";
-                cin >> selection;
+                std::cin >> selection;
             }
             pythonRoot = possiblePythonRoots[selection - 1];
         }
     }
 
     while (true) {
-        cout << "\n================================\n"
+        std::cout << "\n================================\n"
             << "    H A U P T -  M E N U E     \n"
             << "================================\n";
 
         // 1. Client
         setColor(hasClientHeader ? 10 : 12);
-        cout << "1. Client\n";
+        std::cout << "1. Client\n";
         // 2. Server
         setColor(hasServerHeader ? 10 : 12);
-        cout << "2. Server\n";
+        std::cout << "2. Server\n";
         // 3. Python
         setColor(hasPythonRoot ? 10 : 12);
-        cout << "3. Python\n";
+        std::cout << "3. Python\n";
         // 0. Exit
         setColor(7);
-        cout << "0. Exit\n";
-        cout << "Choice: ";
+        std::cout << "0. Exit\n";
+        std::cout << "Choice: ";
         int choice;
-        cin >> choice;
-        if (!cin || choice == 0) {
+        std::cin >> choice;
+        if (!std::cin || choice == 0) {
             break;
         }
 
         // A) Client
         if (choice == 1) {
             if (!hasClientHeader) {
-                cerr << "Kein Client-Header (locale_inc.h) gefunden!\n";
+                std::cerr << "Kein Client-Header (locale_inc.h) gefunden!\n";
                 continue;
             }
             // lies #defines
             auto defines = readDefines(clientHeaderName);
             if (defines.empty()) {
-                cerr << "Keine #define-Eintraege in " << clientHeaderName << "!\n";
+                std::cerr << "Keine #define-Eintraege in " << clientHeaderName << "!\n";
                 continue;
             }
             // suche c++ dateien
             auto sourceFiles = findSourceFiles();
             if (sourceFiles.empty()) {
-                cerr << "Keine .cpp/.h-Dateien gefunden.\n";
+                std::cerr << "Keine .cpp/.h-Dateien gefunden.\n";
                 continue;
             }
 
             while (true) {
-                cout << "\nCLIENT-Header: " << clientHeaderName << "\n";
-                cout << "Gefundene #defines:\n";
+                std::cout << "\nCLIENT-Header: " << clientHeaderName << "\n";
+                std::cout << "Gefundene #defines:\n";
                 for (size_t i = 0; i < defines.size(); ++i) {
-                    cout << (i + 1) << ". " << defines[i] << "\n";
+                    std::cout << (i + 1) << ". " << defines[i] << "\n";
                 }
-                cout << "0. Zurueck\nWahl: ";
+                std::cout << "0. Zurueck\nWahl: ";
                 int dchoice;
-                cin >> dchoice;
-                if (!cin || dchoice == 0) {
+                std::cin >> dchoice;
+                if (!std::cin || dchoice == 0) {
                     break;
                 }
                 if (dchoice < 0 || dchoice >(int)defines.size()) {
-                    cerr << "Ungueltige Auswahl\n";
+                    std::cerr << "Ungueltige Auswahl\n";
                     continue;
                 }
-                string def = defines[dchoice - 1];
+                std::string def = defines[dchoice - 1];
                 auto results = parseAllFilesMultiThread(sourceFiles, def);
                 auto& allDefineBlocks = results.first;
                 auto& allFunctionBlocks = results.second;
@@ -870,10 +962,10 @@ int main() {
                 fs::create_directory("Output");
                 // Write output
                 {
-                    ostringstream fname;
+                    std::ostringstream fname;
                     fname << "Output/CLIENT_" << def << "_DEFINE.txt";
-                    ofstream outDef(fname.str());
-                    unordered_set<string> defFiles;
+                    std::ofstream outDef(fname.str());
+                    std::unordered_set<std::string> defFiles;
                     for (auto& b : allDefineBlocks) {
                         outDef << b.content << "\n";
                         defFiles.insert(b.filename);
@@ -885,10 +977,10 @@ int main() {
                     }
                 }
                 {
-                    ostringstream fname;
+                    std::ostringstream fname;
                     fname << "Output/CLIENT_" << def << "_FUNC.txt";
-                    ofstream outFunc(fname.str());
-                    unordered_set<string> funcFiles;
+                    std::ofstream outFunc(fname.str());
+                    std::unordered_set<std::string> funcFiles;
                     for (auto& b : allFunctionBlocks) {
                         outFunc << b.content << "\n";
                         funcFiles.insert(b.filename);
@@ -900,53 +992,53 @@ int main() {
                     }
                 }
                 setColor(10);
-                cout << "Fertig fuer define '" << def << "'\n";
+                std::cout << "Fertig fuer define '" << def << "'\n";
                 setColor(7);
             }
         }
         // B) Server
         else if (choice == 2) {
             if (!hasServerHeader) {
-                cerr << "Kein Server-Header (service.h/commondefines.h) gefunden!\n";
+                std::cerr << "Kein Server-Header (service.h/commondefines.h) gefunden!\n";
                 continue;
             }
             auto defines = readDefines(serverHeaderName);
             if (defines.empty()) {
-                cerr << "Keine #define-Eintraege in " << serverHeaderName << "!\n";
+                std::cerr << "Keine #define-Eintraege in " << serverHeaderName << "!\n";
                 continue;
             }
             auto sourceFiles = findSourceFiles();
             if (sourceFiles.empty()) {
-                cerr << "Keine .cpp/.h-Dateien gefunden.\n";
+                std::cerr << "Keine .cpp/.h-Dateien gefunden.\n";
                 continue;
             }
             while (true) {
-                cout << "\nSERVER-Header: " << serverHeaderName << "\n";
-                cout << "Gefundene #defines:\n";
+                std::cout << "\nSERVER-Header: " << serverHeaderName << "\n";
+                std::cout << "Gefundene #defines:\n";
                 for (size_t i = 0; i < defines.size(); ++i) {
-                    cout << (i + 1) << ". " << defines[i] << "\n";
+                    std::cout << (i + 1) << ". " << defines[i] << "\n";
                 }
-                cout << "0. Zurueck\nWahl: ";
+                std::cout << "0. Zurueck\nWahl: ";
                 int dchoice;
-                cin >> dchoice;
-                if (!cin || dchoice == 0) {
+                std::cin >> dchoice;
+                if (!std::cin || dchoice == 0) {
                     break;
                 }
                 if (dchoice < 0 || dchoice >(int)defines.size()) {
-                    cerr << "Ungueltige Auswahl\n";
+                    std::cerr << "Ungueltige Auswahl\n";
                     continue;
                 }
-                string def = defines[dchoice - 1];
+                std::string def = defines[dchoice - 1];
                 auto results = parseAllFilesMultiThread(sourceFiles, def);
                 auto& allDefineBlocks = results.first;
                 auto& allFunctionBlocks = results.second;
 
                 fs::create_directory("Output");
                 {
-                    ostringstream fname;
+                    std::ostringstream fname;
                     fname << "Output/SERVER_" << def << "_DEFINE.txt";
-                    ofstream outDef(fname.str());
-                    unordered_set<string> defFiles;
+                    std::ofstream outDef(fname.str());
+                    std::unordered_set<std::string> defFiles;
                     for (auto& b : allDefineBlocks) {
                         outDef << b.content << "\n";
                         defFiles.insert(b.filename);
@@ -958,10 +1050,10 @@ int main() {
                     }
                 }
                 {
-                    ostringstream fname;
+                    std::ostringstream fname;
                     fname << "Output/SERVER_" << def << "_FUNC.txt";
-                    ofstream outFunc(fname.str());
-                    unordered_set<string> funcFiles;
+                    std::ofstream outFunc(fname.str());
+                    std::unordered_set<std::string> funcFiles;
                     for (auto& b : allFunctionBlocks) {
                         outFunc << b.content << "\n";
                         funcFiles.insert(b.filename);
@@ -973,19 +1065,19 @@ int main() {
                     }
                 }
                 setColor(10);
-                cout << "Fertig fuer define '" << def << "'\n";
+                std::cout << "Fertig fuer define '" << def << "'\n";
                 setColor(7);
             }
         }
         // C) Python
         else if (choice == 3) {
             if (!hasPythonRoot) {
-                cerr << "python_root Ordner nicht gefunden!\n";
+                std::cerr << "python_root Ordner nicht gefunden!\n";
                 continue;
             }
 
             // Ermittle alle .py in pythonRoot (rekursiv)
-            vector<string> pyFiles;
+            std::vector<std::string> pyFiles;
             for (auto& p : fs::recursive_directory_iterator(pythonRoot)) {
                 if (!fs::is_regular_file(p)) continue;
                 if (p.path().extension() == ".py") {
@@ -993,34 +1085,34 @@ int main() {
                 }
             }
             if (pyFiles.empty()) {
-                cerr << "Keine .py-Dateien in " << pythonRoot << "\n";
+                std::cerr << "Keine .py-Dateien in " << pythonRoot << "\n";
                 continue;
             }
             // Sammle Parameter
             auto paramSet = collectPythonParameters(pyFiles);
             if (paramSet.empty()) {
-                cerr << "Keine 'if app.xyz' in python_root gefunden!\n";
+                std::cerr << "Keine 'if app.xyz' in python_root gefunden!\n";
                 continue;
             }
-            vector<string> params(paramSet.begin(), paramSet.end());
+            std::vector<std::string> params(paramSet.begin(), paramSet.end());
             sort(params.begin(), params.end());
 
             while (true) {
-                cout << "\nPython-Parameter im Ordner " << pythonRoot << ":\n";
+                std::cout << "\nPython-Parameter im Ordner " << pythonRoot << ":\n";
                 for (size_t i = 0; i < params.size(); ++i) {
-                    cout << (i + 1) << ". " << params[i] << "\n";
+                    std::cout << (i + 1) << ". " << params[i] << "\n";
                 }
-                cout << "0. Zurueck\nWahl: ";
+                std::cout << "0. Zurueck\nWahl: ";
                 int pchoice;
-                cin >> pchoice;
-                if (!cin || pchoice == 0) {
+                std::cin >> pchoice;
+                if (!std::cin || pchoice == 0) {
                     break;
                 }
                 if (pchoice < 0 || pchoice >(int)params.size()) {
-                    cerr << "Ungueltige Auswahl\n";
+                    std::cerr << "Ungueltige Auswahl\n";
                     continue;
                 }
-                string chosenParam = params[pchoice - 1];
+                std::string chosenParam = params[pchoice - 1];
 
                 // parse + ausgabe
                 auto pyResults = parsePythonAllFilesMultiThread(pyFiles, chosenParam);
@@ -1030,10 +1122,10 @@ int main() {
                 fs::create_directory("Output");
                 // "If-Blöcke" analog "DEFINE"
                 {
-                    ostringstream fname;
+                    std::ostringstream fname;
                     fname << "Output/PYTHON_" << chosenParam << "_DEFINE.txt";
-                    ofstream out(fname.str());
-                    unordered_set<string> defFiles;
+                    std::ofstream out(fname.str());
+                    std::unordered_set<std::string> defFiles;
                     for (auto& b : ifBlocks) {
                         out << b.content << "\n";
                         defFiles.insert(b.filename);
@@ -1046,10 +1138,10 @@ int main() {
                 }
                 // "Funktions-Blöcke"
                 {
-                    ostringstream fname;
+                    std::ostringstream fname;
                     fname << "Output/PYTHON_" << chosenParam << "_FUNC.txt";
-                    ofstream out(fname.str());
-                    unordered_set<string> funcFiles;
+                    std::ofstream out(fname.str());
+                    std::unordered_set<std::string> funcFiles;
                     for (auto& b : funcBlocks) {
                         out << b.content << "\n";
                         funcFiles.insert(b.filename);
@@ -1061,12 +1153,12 @@ int main() {
                     }
                 }
                 setColor(10);
-                cout << "Fertig fuer app." << chosenParam << "\n";
+                std::cout << "Fertig fuer app." << chosenParam << "\n";
                 setColor(7);
             }
         }
         else {
-            cerr << "Unbekannte Auswahl!\n";
+            std::cerr << "Unbekannte Auswahl!\n";
         }
     }
 
