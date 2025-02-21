@@ -557,15 +557,27 @@ parsePythonFileSinglePass(const std::string& filename,
   */
 std::unordered_set<std::string> collectPythonParameters(const std::vector<std::string>& pyFiles) {
     std::unordered_set<std::string> params;
-    for (auto& f : pyFiles) {
+
+    static const std::unordered_set<std::string> blacklist = {
+        "loggined", "VK_UP", "VK_RIGHT", "VK_LEFT", "VK_HOME", "VK_END", "VK_DOWN", "VK_DELETE",
+        "TARGET", "SELL", "BUY", "DIK_DOWN", "DIK_F1", "DIK_F2", "DIK_F3", "DIK_F4",
+        "DIK_H", "DIK_LALT", "DIK_LCONTROL", "DIK_RETURN", "DIK_SYSRQ", "DIK_UP", "DIK_V", "GetGlobalTime",
+        "GetTime", "IsDevStage", "IsEnableTestServerFlag", "IsExistFile", "IsPressed", "IsWebPageMode",
+    };
+
+    for (const auto& f : pyFiles) {
         std::ifstream ifs(f);
         if (!ifs.is_open()) continue;
+
         std::string line;
         while (getline(ifs, line)) {
             std::smatch m;
-            if (regex_search(line, m, pythonIfAppRegex)) {
-                if (m.size() > 1) {
-                    params.insert(m[1].str());
+            if (std::regex_search(line, m, pythonIfAppRegex) && m.size() > 1) {
+                std::string param = m[1].str();
+
+                // Falls Parameter in der Blacklist ist, überspringen
+                if (blacklist.find(param) == blacklist.end()) {
+                    params.insert(param);
                 }
             }
         }
