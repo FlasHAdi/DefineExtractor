@@ -92,7 +92,7 @@ Das Tool unterstützt Mehrfach-Threads und kann große Codebasen effizient durch
 
 - **Bug Reports & Feature Requests**: Bitte im zugehörigen Repository ein **Issue** erstellen.
 - **Pull Requests** sind immer willkommen.
-- **Weitere Fragen**: Siehe [HowTo.md](HowTo.md) für Einrichtungsdetails oder kontaktiere den Autor direkt.
+- **Weitere Fragen**: Siehe [HowTo.md](HOWTO.md) für Einrichtungsdetails oder kontaktiere den Autor direkt.
 
 ---
 
@@ -141,7 +141,7 @@ It employs multithreading for faster scanning of large codebases, making it easy
 ### 4. Folder Layout & Running the Program
 
 1. **Executable**  
-   - After a successful build (see [HowTo.md](HowTo.md)), you’ll have `DefineExtractor.exe`.
+   - After a successful build (see [HowTo.md](HOWTO.md)), you’ll have `DefineExtractor.exe`.
    - Place it in a convenient directory that can access your Client, Server, or Python source folders.
 
 2. **Client, Server, and Python Folders**  
