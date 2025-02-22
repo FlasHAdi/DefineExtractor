@@ -226,7 +226,17 @@ parseFileSinglePass(const std::string& filename,
 
         // #if define
         if (!insideDefineBlock) {
-            if (std::regex_search(line, startDefineRegex)) {
+            if (line.find("#if ") != std::string::npos ||
+                line.find("#ifdef ") != std::string::npos ||
+                line.find("#ifndef ") != std::string::npos)
+            {
+                insideDefineBlock = true;
+                defineNesting = 1;
+                currentDefineBlock.str("");
+                currentDefineBlock.clear();
+                currentDefineBlock << line << "\n";
+            }
+            else if (std::regex_search(line, startDefineRegex)) {
                 insideDefineBlock = true;
                 defineNesting = 1;
                 currentDefineBlock.str("");
@@ -240,7 +250,7 @@ parseFileSinglePass(const std::string& filename,
             if (std::regex_search(line, anyIfStartRegex)) {
                 defineNesting++;
             }
-            else if (std::regex_search(line, endifRegex)) {
+            else if (line.find("#endif") != std::string::npos) {
                 defineNesting--;
                 if (defineNesting <= 0) {
                     CodeBlock cb;
@@ -537,10 +547,23 @@ std::unordered_set<std::string> collectPythonParameters(const std::vector<std::s
         std::string line;
         while (std::getline(ifs, line)) {
             std::smatch m;
-            if (std::regex_search(line, m, pythonIfAppRegex) && m.size() > 1) {
-                std::string param = m[1].str();
-                if (blacklist.find(param) == blacklist.end()) {
+            size_t pos = line.find("if app.");
+            if (pos != std::string::npos) {
+                size_t start = pos + 7;
+                size_t end = line.find_first_of(" ():", start);
+                std::string param = line.substr(start, end - start);
+
+                if (!param.empty() && blacklist.find(param) == blacklist.end()) {
                     params.insert(param);
+                }
+            }
+            else if (std::regex_search(line, pythonIfAppRegex)) {
+                std::smatch m;
+                if (std::regex_search(line, m, pythonIfAppRegex) && m.size() > 1) {
+                    std::string param = m[1].str();
+                    if (blacklist.find(param) == blacklist.end()) {
+                        params.insert(param);
+                    }
                 }
             }
         }
@@ -890,12 +913,16 @@ std::vector<std::string> readDefines(const std::string& filename) {
         return result;
     }
 
-    static const std::regex defineRegex(R"(^\s*#\s*define\s+(\w+))");
     std::string line;
     while (std::getline(ifs, line)) {
-        std::smatch m;
-        if (std::regex_search(line, m, defineRegex)) {
-            result.push_back(m[1].str());
+        size_t pos = line.find("#define ");
+        if (pos != std::string::npos) {
+            std::istringstream iss(line.substr(pos + 8)); // Nach "#define "
+            std::string defineName;
+            iss >> defineName;
+            if (!defineName.empty()) {
+                result.push_back(defineName);
+            }
         }
     }
     return result;
