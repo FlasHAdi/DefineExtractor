@@ -1,180 +1,187 @@
-# README
+# DefineExtractor
 
-## English Version
-
-### What does this tool do?
-
-This tool scans through C++ and Python files in a given directory structure. It analyzes:
-- C++ code for `#if/#ifdef/#ifndef` blocks that match specific `#define` macros
-- C++ function definitions potentially affected by these defines
-- Python code for `if app.<param>` statements
-- Python functions containing these `if app.<param>` conditions
-
-It then outputs all the discovered code blocks (both conditional blocks and functions) into separate text files for easy review.
-
-### Overview
-
-1. **C++ Parsing**  
-   - Searches for specific `#define` names in two particular header files (for example, `locale_inc.h` and `service.h/commondefines.h`).  
-   - Recursively scans through `.cpp` and `.h` files.  
-   - Collects all code blocks wrapped in `#if / #ifdef / #ifndef` that match the chosen macro.  
-   - Detects and extracts functions that contain or are influenced by these macros.
-
-2. **Python Parsing**  
-   - Looks for lines containing `if app.<param>` patterns.  
-   - Gathers the Python functions that contain these conditions.  
-
-3. **Output Generation**  
-   - For each chosen `#define` (in C++) or Python parameter, two files are created under an `Output/` folder:  
-     - One for conditional blocks (`*_DEFINE.txt`).  
-     - One for functions (`*_FUNC.txt`).  
-   - Each file includes a summary listing the source files where blocks were found.
-
-### How it Works
-
-1. **Parameter Discovery**  
-   - For C++, the tool reads all available `#define` names from the specified header.  
-   - For Python, it searches `if app.xyz` lines across Python files to collect possible parameter names (`xyz`).  
-
-2. **Multi-Threaded Parsing**  
-   - The tool counts lines first (using a cache to avoid redundant reads).  
-   - It then creates multiple threads (up to the number of hardware concurrency or the number of files, whichever is smaller).  
-   - Each thread processes a subset of the files in parallel, ensuring quick scanning on large codebases.  
-
-3. **Block Extraction**  
-   - Whenever a `#if/<if` condition matches the chosen define or Python parameter, the tool accumulates all lines until the end of that block.  
-   - Functions are recognized by pattern matching on function signatures (C++: via a regex for possible function heads; Python: via `def` statements).  
-   - If a function contains any matching condition, it’s marked as "relevant" and extracted.
-
-4. **Progress Indication**  
-   - While running, the tool shows a progress bar in the console, updating at regular intervals as files are parsed.
-
-### Visual Studio Settings to Build the Tool
-
-1. **Project Creation**  
-   - Create a new **Console Application** in Visual Studio (C++).  
-   - Ensure C++17 (or newer) is enabled, as `<filesystem>` is used.  
-
-2. **Additional Dependencies**  
-   - The code uses `<regex>`, `<thread>`, `<mutex>`, `<atomic>`, `<filesystem>`. These should be available in C++17+ by default.  
-
-3. **Character Set and Warnings**  
-   - You might want to set the project to **Multi-Byte** or **Unicode**. The code primarily uses standard string functions, so no special requirement here.  
-   - Disable or fix any warning levels as needed.  
-
-4. **Include and Link**  
-   - No extra libraries are required beyond the standard C++ library.  
-
-### Compiling and Running
-
-1. **Compiling**  
-   - Load the solution in Visual Studio.  
-   - Ensure the configuration is set to **Release** (for best performance) or **Debug** if you want to step through code.  
-   - Click **Build** -> **Build Solution**.
-
-2. **Running**  
-   - Place the compiled executable in a directory from which it can recursively scan the code. Usually, you can run it from the project folder (where the `.cpp` files are).  
-   - The tool will automatically look for `locale_inc.h`, `service.h`, or `commondefines.h` in the directory tree, as well as a folder named `root` for Python files.  
-   - Follow the on-screen menu instructions to choose your define or Python parameter.  
-
-### Performance
-
-- **Line Counting**  
-  - The tool maintains a cache so each file's line count is determined only once. This reduces unnecessary repeated file reads.
-
-- **Multi-Threading**  
-  - By dividing the parsing across multiple threads, the tool can handle even large codebases efficiently, often limited by the speed of your disk and CPU cores.
-
-- **Progress Bar**  
-  - Displays real-time progress. Parsing speed is typically fast enough that the progress bar will be quite responsive, though it only refreshes at small intervals to avoid overhead.
+[**Deutsch**](#deutsch) | [**English**](#english)
 
 ---
 
-## Deutsche Version
+## <a name="deutsch"></a>Deutsch
 
-### Was macht dieses Tool?
+### 1. Überblick
 
-Dieses Tool durchforstet C++- und Python-Dateien in einer angegebenen Verzeichnisstruktur. Es analysiert:
-- C++-Code nach `#if/#ifdef/#ifndef`-Blöcken, die zu bestimmten `#define`-Makros passen
-- C++-Funktionsdefinitionen, die möglicherweise von diesen Defines betroffen sind
-- Python-Code nach Zeilen `if app.<param>`
-- Python-Funktionen, welche diese `if app.<param>`-Bedingungen enthalten
+**DefineExtractor** ist ein C++-Kommandozeilenprogramm für Windows, das Quellcode nach folgenden Mustern durchsucht:
+- `#define`-Makros in `.h`- und `.cpp`-Dateien
+- `app.xyz`-Aufrufe in `.py`-Dateien
 
-Alle gefundenen Code-Blöcke (sowohl Bedingungsblöcke als auch Funktionsblöcke) werden in separate Textdateien ausgegeben, damit sie leicht überprüft werden können.
+Das Tool unterstützt Mehrfach-Threads und kann große Codebasen effizient durchsuchen. Es hilft dabei, schnell die relevanten Stellen für bestimmte Defines oder Python-Parameter zu finden.
 
-### Übersicht
+---
 
-1. **C++-Parsing**  
-   - Sucht bestimmte `#define`-Namen in zwei speziellen Headerdateien (z.B. `locale_inc.h` und `service.h/commondefines.h`).  
-   - Durchsucht rekursiv `.cpp`- und `.h`-Dateien.  
-   - Sammelt alle Code-Blöcke, die in `#if / #ifdef / #ifndef`-Bedingungen liegen, welche das ausgewählte Makro betreffen.  
-   - Ermittelt und extrahiert alle Funktionen, die diese Defines enthalten oder von ihnen beeinflusst werden.
+### 2. Hauptfunktionen
 
-2. **Python-Parsing**  
-   - Sucht nach Zeilen, die `if app.<param>` enthalten.  
-   - Identifiziert die zugehörigen Python-Funktionen, falls innerhalb derselben Funktionsdefinition.  
+1. **Automatische Header-Erkennung**  
+   - Findet `locale_inc.h` (Client) sowie `service.h` / `commondefines.h` (Server) durch Durchsuchen einschlägiger Unterordner.
 
-3. **Ausgabe**  
-   - Für jeden ausgewählten `#define` (C++) oder Python-Parameter werden unter dem Ordner `Output/` jeweils zwei Dateien erzeugt:  
-     - Eine für die Bedingungsblöcke (`*_DEFINE.txt`).  
-     - Eine für die Funktionsblöcke (`*_FUNC.txt`).  
-   - Jede Datei enthält zudem eine Zusammenfassung, in welchen Dateien Blöcke gefunden wurden.
+2. **Makro-Listing**  
+   - Zeigt alle definierten Makros aus den erkannten Headern an, um gezielt nach einem bestimmten `#define` zu suchen.
 
-### Funktionsweise
+3. **Python-Parameter**  
+   - Ermittelt alle Aufrufe im Format `app.xyz` innerhalb von `.py`-Dateien und listet diese übersichtlich auf.
 
-1. **Ermitteln der Parameter**  
-   - Für C++ liest das Tool alle vorhandenen `#define`-Namen aus der angegebenen Headerdatei.  
-   - Für Python durchsucht es sämtliche Python-Dateien nach Zeilen der Form `if app.xyz`, um mögliche Parameter (`xyz`) zu sammeln.  
+4. **Ausgabedateien in `Output/`**  
+   - Für jedes gescannte Makro bzw. jeden Python-Parameter erzeugt das Tool zwei Textdateien:  
+     - `*_DEFINE.txt`: Fundstellen für `#if <DEFINE>`-Blöcke bzw. `if app.xyz`  
+     - `*_FUNC.txt`: Funktionen oder Methoden, in denen das Define bzw. der Parameter auftaucht
 
-2. **Multi-Threaded Parsing**  
-   - Das Tool ermittelt zunächst die Zeilenanzahl aller relevanten Dateien (unter Nutzung eines Caches, um Mehrfachzugriffe zu vermeiden).  
-   - Anschließend werden mehrere Threads (bis zur Anzahl der CPU-Kerne oder der verfügbaren Dateien) gestartet.  
-   - Jeder Thread bearbeitet einen Teil der Dateien parallel, was für eine schnelle Verarbeitung auch in größeren Codebasen sorgt.
+5. **Multithreading**  
+   - Dank gleichzeitiger Verarbeitung mehrerer Dateien kann die Suche in großen Projekten deutlich beschleunigt werden.
 
-3. **Block-Extraktion**  
-   - Bei einem Fund von `#if/<if`-Bedingungen mit dem gesuchten Macro oder Python-Parameter, sammelt das Tool den gesamten Codeblock bis zum Ende.  
-   - Funktionen werden per Regex (C++: mögliche Funktionssignaturen, Python: `def`) erkannt.  
-   - Enthält eine Funktion einen relevanten Bedingungsblock, wird sie markiert und in die Ausgabe übernommen.
+---
 
-4. **Fortschrittsanzeige**  
-   - Während der Laufzeit wird in der Konsole ein Fortschrittsbalken angezeigt, der sich in kurzen Abständen aktualisiert.
+### 3. Performance & Ablauf
 
-### Visual-Studio-Einstellungen zum Erstellen des Tools
+- **Parallele Verarbeitung**: Das Tool verteilt die zu durchsuchenden Dateien auf mehrere Threads (abhängig von der CPU-Anzahl).
+- **Regex-gestütztes Parsing**: `#if`-Blöcke, Funktionsköpfe sowie Python-`if`-Statements werden über reguläre Ausdrücke erkannt. Dies funktioniert in den meisten konventionellen Code-Stilen zuverlässig.
+- **Statusanzeige**: Während der Suche wird eine Fortschrittsleiste im Terminal angezeigt, die den aktuellen Fortschritt (in %) darstellt.
+- **Ergebnisstruktur**: Pro Suchlauf entstehen zwei Kategorien von Ausgaben (für Blöcke und für Funktionen). Ein Überblick der betroffenen Dateien wird am Ende jeder Ausgabedatei angehängt.
 
-1. **Projekt anlegen**  
-   - Erstellen Sie eine neue **Konsolenanwendung** in Visual Studio (C++).  
-   - Aktivieren Sie C++17 (oder höher), da `<filesystem>` genutzt wird.  
+---
 
-2. **Zusätzliche Abhängigkeiten**  
-   - Das Programm verwendet `<regex>`, `<thread>`, `<mutex>`, `<atomic>`, `<filesystem>`. Diese sind in C++17+ standardmäßig enthalten.  
+### 4. Verzeichnisstruktur & Programmstart
 
-3. **Zeichensatz und Warnungen**  
-   - Ggf. Projekt auf **Multi-Byte** oder **Unicode** einstellen. Das Programm verwendet Standard-String-Funktionen, daher gibt es hier keine besonderen Anforderungen.  
-   - Warnlevel nach Bedarf anpassen oder beheben.  
+1. **Programmdatei**  
+   - Nach erfolgreichem Build (siehe [HowTo.md](HowTo.md)) erhältst du eine ausführbare Datei (z.B. `DefineExtractor.exe`).
+   - Platziere sie in einer für dich sinnvollen Ordnerstruktur, in der du Zugriff auf deine Client-, Server- oder Python-Verzeichnisse hast.
 
-4. **Include und Linker**  
-   - Es werden keine weiteren Bibliotheken benötigt, nur die Standard-C++-Bibliothek.  
+2. **Client-, Server-, Python-Verzeichnisse**  
+   - Idealerweise liegen diese Ordner auf derselben Ebene wie das Build-Verzeichnis:
+     ```
+     C:\MeineProjekte\
+       ├─ DefineExtractor\ (enthält EXE)
+       ├─ MeinClient\
+       ├─ MeinServer\
+       └─ PythonStuff\
+     ```
+   - So kann das Tool leicht die relevanten Pfade durchsuchen.
 
-### Kompilieren und Ausführen
+3. **Ausführung**  
+   - Starte die Anwendung per Doppelklick oder über eine Kommandozeile (CMD/PowerShell).
+   - Wähle zunächst in einem Menü die Pfade für **Client**, **Server** und **Python Root**.
+   - Anschließend im **Hauptmenü** die gewünschte Option (Client/Server/Python) auswählen und ein Makro bzw. einen Parameter scannen.
 
-1. **Kompilieren**  
-   - Öffnen Sie die Lösung in Visual Studio.  
-   - Stellen Sie sicher, dass die Konfiguration auf **Release** (für optimale Performance) oder **Debug** (zum Debuggen) gesetzt ist.  
-   - Wählen Sie **Build** -> **Build Solution** aus.
+---
 
-2. **Ausführen**  
-   - Kopieren Sie die erzeugte ausführbare Datei in ein Verzeichnis, in dem das Tool rekursiv nach Code-Dateien suchen kann. Häufig ist das direkt der Projektordner.  
-   - Das Tool sucht automatisch nach `locale_inc.h`, `service.h` oder `commondefines.h` sowie nach einem Ordner namens `root` für Python-Dateien.  
-   - Befolgen Sie die Menüanweisungen in der Konsole, um Ihren gewünschten `#define` oder Python-Parameter auszuwählen.  
+### 5. Bekannte Einschränkungen
 
-### Performance
+- **Regex-Grenzen**  
+  Bei sehr unkonventionellen Code-Stilen (z.B. stark verschachtelte Makros) kann die Erkennung fehlschlagen oder versehentlich zu viel mit erfassen.
+- **Nur Windows optimiert**  
+  Zwar basiert das Projekt weitgehend auf C++17 und könnte unter Linux kompiliert werden, jedoch ist das Hauptaugenmerk auf Windows/Visual Studio gerichtet.
+- **Keine tiefe Python-Analyse**  
+  Die Python-Suche beschränkt sich auf `if app.xyz`-Blöcke und deren Einrückung sowie Funktionsdefinitionen (`def`). Komplexere Strukturen (z.B. Klassen) werden nicht gesondert behandelt.
 
-- **Zeilenanzahl-Caching**  
-  - Die Zeilenanzahl jeder Datei wird nur einmal ermittelt und zwischengespeichert, um unnötige Wiederholungen beim Zugriff auf dieselbe Datei zu vermeiden.
+---
 
-- **Multi-Threading**  
-  - Durch die Aufteilung des Parsings auf mehrere Threads kann das Tool auch große Codebestände effizient durchsuchen. Die Geschwindigkeit hängt vor allem von der CPU- und Festplattenleistung ab.
+### 6. Lizenz & Haftung
 
-- **Fortschrittsbalken**  
-  - Der Fortschritt wird während des Einlesens angezeigt. Üblicherweise ist das Einlesen schnell genug, sodass die Aktualisierung regelmäßig (alle paar hundert Zeilen) erfolgt.
+- Dieses Projekt enthält **keine spezifische Lizenz**. Gerne kannst du selbst eine hinzufügen (z.B. MIT, Apache 2.0 etc.).
+- Die Nutzung erfolgt **auf eigene Verantwortung**. Es wird keine Haftung für mögliche Schäden oder Datenverluste übernommen.
 
+---
+
+### 7. Kontakt & Support
+
+- **Bug Reports & Feature Requests**: Bitte im zugehörigen Repository ein **Issue** erstellen.
+- **Pull Requests** sind immer willkommen.
+- **Weitere Fragen**: Siehe [HowTo.md](HOWTO.md) für Einrichtungsdetails oder kontaktiere den Autor direkt.
+
+---
+
+## <a name="english"></a>English
+
+### 1. Overview
+
+**DefineExtractor** is a Windows-oriented C++ command-line tool that searches source code for:
+- `#define` macros in `.h` and `.cpp` files
+- `app.xyz` references in `.py` files
+
+It employs multithreading for faster scanning of large codebases, making it easy to locate relevant lines or blocks tied to specific features (defines or Python parameters).
+
+---
+
+### 2. Key Features
+
+1. **Automatic Header Detection**  
+   - Finds `locale_inc.h` (Client) and `service.h` / `commondefines.h` (Server) by scanning typical subfolders.
+
+2. **Macro Listing**  
+   - Displays all macros defined in the discovered headers, allowing targeted searches for a particular `#define`.
+
+3. **Python Parameter Discovery**  
+   - Looks for `app.xyz` calls within `.py` files, listing them systematically.
+
+4. **Output Files in `Output/`**  
+   - For each scanned macro or Python parameter, the tool produces two text files:
+     - `*_DEFINE.txt`: Contains relevant `#if <DEFINE>` or `if app.xyz` blocks
+     - `*_FUNC.txt`: Contains functions/methods referencing that define or parameter
+
+5. **Multithreading**  
+   - Uses multiple threads to quickly process large file sets on multi-core CPUs.
+
+---
+
+### 3. Performance & Workflow
+
+- **Parallel File Processing**: Distributes work across available CPU cores (thread count typically matches hardware concurrency).
+- **Regex-Based Parsing**: Identifies `#if` blocks, function declarations, and Python `if app.xyz` statements via regular expressions.
+- **Progress Display**: A progress bar in the console shows the scanning progress in real time.
+- **Result Structure**: Each search yields two categories of output (blocks vs. functions). A summary of affected files is appended at the end of each output file.
+
+---
+
+### 4. Folder Layout & Running the Program
+
+1. **Executable**  
+   - After a successful build (see [HowTo.md](HOWTO.md)), you’ll have `DefineExtractor.exe`.
+   - Place it in a convenient directory that can access your Client, Server, or Python source folders.
+
+2. **Client, Server, and Python Folders**  
+   - Typically, these folders sit in the same root as the build directory:
+     ```
+     C:\MyProjects\
+       ├─ DefineExtractor\ (contains the .exe)
+       ├─ MyClient\
+       ├─ MyServer\
+       └─ PythonStuff\
+     ```
+   - This layout makes scanning easier.
+
+3. **Execution**  
+   - Double-click the .exe or run it from a command prompt (CMD/PowerShell).
+   - Choose your **Client** path, **Server** path, and **Python Root** in the path setup menu.
+   - Then, from the **main menu**, pick Client/Server/Python and select a macro or parameter to scan.
+
+---
+
+### 5. Known Limitations
+
+- **Regex Boundaries**  
+  With highly unconventional or macro-heavy code, there is a risk of missing or over-including certain lines.
+- **Windows Focus**  
+  Although it uses standard C++17, the primary focus is Windows + Visual Studio.
+- **Limited Python Analysis**  
+  The Python search only targets `if app.xyz` blocks (with indentation) and function definitions (`def`). It doesn’t handle classes or more complex structures in detail.
+
+---
+
+### 6. License & Disclaimer
+
+- **No specific license** is included by default. Feel free to add one (e.g., MIT, Apache 2.0).
+- **Use at your own risk**. We assume no liability for any damage or data loss.
+
+---
+
+### 7. Contact & Support
+
+- **Bug Reports & Feature Requests**: Please file an **Issue** in the repository.
+- **Pull Requests** are welcome.
+- **Further Questions**: Refer to [HowTo.md](HowTo.md) for setup instructions or contact the author directly.
