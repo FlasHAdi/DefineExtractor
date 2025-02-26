@@ -275,38 +275,30 @@ parseFileSinglePass(const std::string& filename,
     size_t totalLines,
     size_t& outLineCount)
 {
-    std::vector<CodeBlock> defineBlocks;
-    std::vector<CodeBlock> functionBlocks;
-
     std::vector<std::string> lines;
     readBufferedFile(filename, lines);
 
-    auto ext = fs::path(filename).extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    bool isHeader = (ext == ".h");
+    std::vector<CodeBlock> defineBlocks;
+    std::vector<CodeBlock> functionBlocks;
 
+    bool insideDefineBlock = false;
+    int  defineNesting = 0;
+    std::ostringstream currentDefineBlock;
 
     bool inFunction = false;
-    int braceCount = 0;
+    int  braceCount = 0;
     bool functionRelevant = false;
     std::ostringstream currentFunc;
 
     bool potentialFunctionHead = false;
     std::ostringstream potentialHeadBuffer;
 
-    bool isInPublic = false;
-    bool isInPrivate = false;
-
-    if (!isHeader)
+    for (size_t i = 0; i < lines.size(); ++i)
     {
-        bool insideDefineBlock = false;
-        int  defineNesting = 0;
-        std::ostringstream currentDefineBlock;
+        const auto& line = lines[i];
+        outLineCount++;
 
-        for (size_t i = 0; i < lines.size(); i++)
         {
-            outLineCount++;
-            // Progress
             thread_local size_t tls_counter = 0;
             tls_counter++;
             if (tls_counter % 500 == 0) {
@@ -314,153 +306,52 @@ parseFileSinglePass(const std::string& filename,
                 tls_counter = 0;
                 printProgress(processed.load(), totalLines);
             }
-
-            auto& line = lines[i];
-
-            if (!insideDefineBlock) {
-                if ((line.find("#if ") != std::string::npos ||
-                    line.find("#ifdef ") != std::string::npos ||
-                    line.find("#ifndef ") != std::string::npos) &&
-                    std::regex_search(line, startDefineRegex))
-                {
-                    insideDefineBlock = true;
-                    defineNesting = 1;
-                    currentDefineBlock.str("");
-                    currentDefineBlock.clear();
-                    currentDefineBlock << line << "\n";
-                }
-            }
-            else {
-                currentDefineBlock << line << "\n";
-                if (std::regex_search(line, anyIfStartRegex)) {
-                    defineNesting++;
-                }
-                else if (line.find("#endif") != std::string::npos) {
-                    defineNesting--;
-                    if (defineNesting <= 0) {
-                        CodeBlock cb;
-                        cb.filename = filename;
-                        cb.content = "##########\n" + filename + "\n##########\n" +
-                            currentDefineBlock.str();
-                        defineBlocks.push_back(cb);
-
-                        insideDefineBlock = false;
-                        defineNesting = 0;
-                        currentDefineBlock.str("");
-                        currentDefineBlock.clear();
-                    }
-                }
-            }
-        }
-    }
-    else
-    {
-
-    }
-
-    defineBlocks.clear();
-    functionBlocks.clear();
-
-    inFunction = false;
-    braceCount = 0;
-    functionRelevant = false;
-    currentFunc.str("");
-    currentFunc.clear();
-
-    potentialFunctionHead = false;
-    potentialHeadBuffer.str("");
-    potentialHeadBuffer.clear();
-
-    bool insideDefineBlock = false; // .cpp
-    int  defineNesting = 0;
-    std::ostringstream currentDefineBlock;
-
-    for (size_t i = 0; i < lines.size(); i++)
-    {
-        auto& line = lines[i];
-        outLineCount++;
-
-        thread_local size_t tls_counter = 0;
-        tls_counter++;
-        if (tls_counter % 500 == 0) {
-            processed.fetch_add(tls_counter, std::memory_order_relaxed);
-            tls_counter = 0;
-            printProgress(processed.load(), totalLines);
         }
 
-        if (isHeader) {
-            std::string tmpLine = line;
-            std::transform(tmpLine.begin(), tmpLine.end(), tmpLine.begin(), ::tolower);
-            if (tmpLine.find("private:") != std::string::npos) {
-                isInPrivate = true;
-                isInPublic = false;
-            }
-            else if (tmpLine.find("public:") != std::string::npos) {
-                isInPrivate = false;
-                isInPublic = true;
-            }
-        }
-
-        if (isHeader)
+        if (!insideDefineBlock)
         {
-            if ((line.find("#if") != std::string::npos ||
-                line.find("#ifdef") != std::string::npos ||
-                line.find("#ifndef") != std::string::npos ||
-                line.find("#elif") != std::string::npos) &&
-                std::regex_search(line, startDefineRegex))
+            bool isIfLine = (line.find("#if ") != std::string::npos ||
+                line.find("#ifdef ") != std::string::npos ||
+                line.find("#ifndef ") != std::string::npos ||
+                line.find("#elif") != std::string::npos);
+            if (isIfLine && std::regex_search(line, startDefineRegex))
             {
-                int startSnippet = (int)std::max<int>((int)i - 2, 0);
-                int endSnippet = (int)std::min<int>((int)i + 2, (int)lines.size() - 1);
+                int snippetStart = std::max<int>((int)i - 2, 0);
 
-                std::ostringstream snippet;
-                snippet << "##########\n" << filename << "\n##########\n";
+                currentDefineBlock.str("");
+                currentDefineBlock.clear();
 
-                if (isInPrivate) snippet << "[Currently in PRIVATE region]\n";
-                if (isInPublic)  snippet << "[Currently in PUBLIC  region]\n";
-
-                for (int s = startSnippet; s <= endSnippet; ++s) {
-                    snippet << lines[s] << "\n";
+                for (int s = snippetStart; s <= (int)i; ++s)
+                {
+                    currentDefineBlock << lines[s] << "\n";
                 }
-                CodeBlock cb;
-                cb.filename = filename;
-                cb.content = snippet.str();
-                defineBlocks.push_back(cb);
+
+                insideDefineBlock = true;
+                defineNesting = 1;
             }
         }
         else
         {
-            if (!insideDefineBlock) {
-                if ((line.find("#if ") != std::string::npos ||
-                    line.find("#ifdef ") != std::string::npos ||
-                    line.find("#ifndef ") != std::string::npos) &&
-                    std::regex_search(line, startDefineRegex))
-                {
-                    insideDefineBlock = true;
-                    defineNesting = 1;
+            currentDefineBlock << line << "\n";
+
+            static const std::regex anyIfStartRegex(R"(^\s*#\s*(if|ifdef|ifndef)\b)",
+                std::regex_constants::ECMAScript | std::regex_constants::optimize);
+            if (std::regex_search(line, anyIfStartRegex)) {
+                defineNesting++;
+            }
+            else if (line.find("#endif") != std::string::npos) {
+                defineNesting--;
+                if (defineNesting <= 0) {
+                    CodeBlock cb;
+                    cb.filename = filename;
+                    cb.content = "##########\n" + filename + "\n##########\n"
+                        + currentDefineBlock.str();
+                    defineBlocks.push_back(cb);
+
+                    insideDefineBlock = false;
+                    defineNesting = 0;
                     currentDefineBlock.str("");
                     currentDefineBlock.clear();
-                    currentDefineBlock << line << "\n";
-                }
-            }
-            else {
-                currentDefineBlock << line << "\n";
-                if (std::regex_search(line, anyIfStartRegex)) {
-                    defineNesting++;
-                }
-                else if (line.find("#endif") != std::string::npos) {
-                    defineNesting--;
-                    if (defineNesting <= 0) {
-                        CodeBlock cb;
-                        cb.filename = filename;
-                        cb.content = "##########\n" + filename + "\n##########\n" +
-                            currentDefineBlock.str();
-                        defineBlocks.push_back(cb);
-
-                        insideDefineBlock = false;
-                        defineNesting = 0;
-                        currentDefineBlock.str("");
-                        currentDefineBlock.clear();
-                    }
                 }
             }
         }
@@ -470,8 +361,10 @@ parseFileSinglePass(const std::string& filename,
             line.find('(') != std::string::npos);
         bool lineMatchesDefine = std::regex_search(line, startDefineRegex);
 
-        if (!inFunction) {
-            if (potentialFunctionHead) {
+        if (!inFunction)
+        {
+            if (potentialFunctionHead)
+            {
                 potentialHeadBuffer << "\n" << line;
                 bool hasOpenBrace = (line.find('{') != std::string::npos);
                 bool hasSemicolon = (line.find(';') != std::string::npos);
@@ -489,23 +382,28 @@ parseFileSinglePass(const std::string& filename,
                         if (c == '}') braceCount--;
                     }
                     if (lineMatchesDefine) functionRelevant = true;
+
                     potentialFunctionHead = false;
                     potentialHeadBuffer.str("");
                     potentialHeadBuffer.clear();
                 }
                 else if (hasSemicolon) {
-                    // forward-declaration, not a real function body
                     potentialFunctionHead = false;
                     potentialHeadBuffer.str("");
                     potentialHeadBuffer.clear();
                 }
             }
-            else {
+            else
+            {
+                static const std::regex functionHeadRegex(
+                    R"(^\s*(?:inline\s+|static\s+|virtual\s+|constexpr\s+|friend\s+|typename\s+|[\w:\*&<>]+\s+)*[\w:\*&<>]+\s+\w[\w:\*&<>]*\s*\([^)]*\)\s*(\{|;|$))",
+                    std::regex_constants::ECMAScript | std::regex_constants::optimize
+                );
+
                 std::smatch match;
                 if (std::regex_search(line, match, functionHeadRegex)) {
                     std::string trailingSymbol = match[1].str();
                     if (trailingSymbol == "{") {
-                        // function starts
                         inFunction = true;
                         braceCount = 0;
                         functionRelevant = false;
@@ -520,10 +418,8 @@ parseFileSinglePass(const std::string& filename,
                         if (lineMatchesDefine) functionRelevant = true;
                     }
                     else if (trailingSymbol == ";") {
-                        // just a declaration
                     }
                     else {
-                        // possibly multi-line function head
                         potentialFunctionHead = true;
                         potentialHeadBuffer.str("");
                         potentialHeadBuffer.clear();
@@ -532,8 +428,8 @@ parseFileSinglePass(const std::string& filename,
                 }
             }
         }
-        else {
-            // we are inside a function
+        else
+        {
             currentFunc << line << "\n";
             if (lineMatchesDefine) {
                 functionRelevant = true;
@@ -545,12 +441,11 @@ parseFileSinglePass(const std::string& filename,
                 }
             }
             if (braceCount <= 0) {
-                // function ends
                 if (functionRelevant) {
                     CodeBlock cb;
                     cb.filename = filename;
-                    cb.content = "##########\n" + filename + "\n##########\n" +
-                        currentFunc.str();
+                    cb.content = "##########\n" + filename + "\n##########\n"
+                        + currentFunc.str();
                     functionBlocks.push_back(cb);
                 }
                 inFunction = false;
