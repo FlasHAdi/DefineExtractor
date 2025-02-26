@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -222,6 +222,47 @@ static const std::regex functionHeadRegex(
 );
 
 /*******************************************************
+ * writeOutputPerFile()
+ * Writes the collected CodeBlocks per source file
+ * into individual files. E.g. in:
+ * Output/CLIENT_<DEFINE>_DEFINE_by_file/foo.cpp.txt
+ *******************************************************/
+void writeOutputPerFile(const std::string& prefix,
+    const std::string& defineName,
+    const std::vector<CodeBlock>& blocks)
+{
+    fs::create_directory("Output");
+
+    std::string outDir = "Output/" + prefix + "_" + defineName + "_files";
+    fs::create_directory(outDir);
+
+    std::map<std::string, std::vector<std::string>> fileToContents;
+    for (const auto& block : blocks) {
+        fileToContents[block.filename].push_back(block.content);
+    }
+
+    for (const auto& kv : fileToContents) {
+        const std::string& srcFile = kv.first;
+        const auto& textBlocks = kv.second;
+
+        std::string baseName = fs::path(srcFile).filename().string();
+
+        std::string outFileName = outDir + "/" + baseName + ".txt";
+        std::ofstream ofs(outFileName, std::ios::app);
+        if (!ofs.is_open()) {
+            std::cerr << "Error when opening " << outFileName << "\n";
+            continue;
+        }
+
+        for (auto& content : textBlocks) {
+            ofs << content << "\n";
+        }
+        ofs << "\n--- SUMMARY: " << textBlocks.size()
+            << " Block(s) in " << baseName << " ---\n\n";
+    }
+}
+
+/*******************************************************
  * parseFileSinglePass():
  *   Parse a C++ file for:
  *     1) #if <DEFINE> blocks
@@ -240,9 +281,10 @@ parseFileSinglePass(const std::string& filename,
     std::vector<std::string> lines;
     readBufferedFile(filename, lines);
 
-    bool insideDefineBlock = false;
-    int  defineNesting = 0;
-    std::ostringstream currentDefineBlock;
+    auto ext = fs::path(filename).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    bool isHeader = (ext == ".h");
+
 
     bool inFunction = false;
     int braceCount = 0;
@@ -252,7 +294,90 @@ parseFileSinglePass(const std::string& filename,
     bool potentialFunctionHead = false;
     std::ostringstream potentialHeadBuffer;
 
-    for (const auto&line : lines) {
+    bool isInPublic = false;
+    bool isInPrivate = false;
+
+    if (!isHeader)
+    {
+        bool insideDefineBlock = false;
+        int  defineNesting = 0;
+        std::ostringstream currentDefineBlock;
+
+        for (size_t i = 0; i < lines.size(); i++)
+        {
+            outLineCount++;
+            // Progress
+            thread_local size_t tls_counter = 0;
+            tls_counter++;
+            if (tls_counter % 500 == 0) {
+                processed.fetch_add(tls_counter, std::memory_order_relaxed);
+                tls_counter = 0;
+                printProgress(processed.load(), totalLines);
+            }
+
+            auto& line = lines[i];
+
+            if (!insideDefineBlock) {
+                if ((line.find("#if ") != std::string::npos ||
+                    line.find("#ifdef ") != std::string::npos ||
+                    line.find("#ifndef ") != std::string::npos) &&
+                    std::regex_search(line, startDefineRegex))
+                {
+                    insideDefineBlock = true;
+                    defineNesting = 1;
+                    currentDefineBlock.str("");
+                    currentDefineBlock.clear();
+                    currentDefineBlock << line << "\n";
+                }
+            }
+            else {
+                currentDefineBlock << line << "\n";
+                if (std::regex_search(line, anyIfStartRegex)) {
+                    defineNesting++;
+                }
+                else if (line.find("#endif") != std::string::npos) {
+                    defineNesting--;
+                    if (defineNesting <= 0) {
+                        CodeBlock cb;
+                        cb.filename = filename;
+                        cb.content = "##########\n" + filename + "\n##########\n" +
+                            currentDefineBlock.str();
+                        defineBlocks.push_back(cb);
+
+                        insideDefineBlock = false;
+                        defineNesting = 0;
+                        currentDefineBlock.str("");
+                        currentDefineBlock.clear();
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+
+    }
+
+    defineBlocks.clear();
+    functionBlocks.clear();
+
+    inFunction = false;
+    braceCount = 0;
+    functionRelevant = false;
+    currentFunc.str("");
+    currentFunc.clear();
+
+    potentialFunctionHead = false;
+    potentialHeadBuffer.str("");
+    potentialHeadBuffer.clear();
+
+    bool insideDefineBlock = false; // .cpp
+    int  defineNesting = 0;
+    std::ostringstream currentDefineBlock;
+
+    for (size_t i = 0; i < lines.size(); i++)
+    {
+        auto& line = lines[i];
         outLineCount++;
 
         thread_local size_t tls_counter = 0;
@@ -263,44 +388,83 @@ parseFileSinglePass(const std::string& filename,
             printProgress(processed.load(), totalLines);
         }
 
-        // Check for the specific #if <DEFINE>
-        if (!insideDefineBlock) {
-            if ((line.find("#if ") != std::string::npos ||
-                line.find("#ifdef ") != std::string::npos ||
-                line.find("#ifndef ") != std::string::npos) &&
-                std::regex_search(line, startDefineRegex))
-            {
-                insideDefineBlock = true;
-                defineNesting = 1;
-                currentDefineBlock.str("");
-                currentDefineBlock.clear();
-                currentDefineBlock << line << "\n";
+        if (isHeader) {
+            std::string tmpLine = line;
+            std::transform(tmpLine.begin(), tmpLine.end(), tmpLine.begin(), ::tolower);
+            if (tmpLine.find("private:") != std::string::npos) {
+                isInPrivate = true;
+                isInPublic = false;
+            }
+            else if (tmpLine.find("public:") != std::string::npos) {
+                isInPrivate = false;
+                isInPublic = true;
             }
         }
-        else {
-            // We are inside a #if <DEFINE> block
-            currentDefineBlock << line << "\n";
-            if (std::regex_search(line, anyIfStartRegex)) {
-                defineNesting++;
-            }
-            else if (line.find("#endif") != std::string::npos) {
-                defineNesting--;
-                if (defineNesting <= 0) {
-                    CodeBlock cb;
-                    cb.filename = filename;
-                    cb.content = "##########\n" + filename + "\n##########\n" +
-                        currentDefineBlock.str();
-                    defineBlocks.push_back(cb);
 
-                    insideDefineBlock = false;
-                    defineNesting = 0;
+        if (isHeader)
+        {
+            if ((line.find("#if") != std::string::npos ||
+                line.find("#ifdef") != std::string::npos ||
+                line.find("#ifndef") != std::string::npos ||
+                line.find("#elif") != std::string::npos) &&
+                std::regex_search(line, startDefineRegex))
+            {
+                int startSnippet = (int)std::max<int>((int)i - 2, 0);
+                int endSnippet = (int)std::min<int>((int)i + 2, (int)lines.size() - 1);
+
+                std::ostringstream snippet;
+                snippet << "##########\n" << filename << "\n##########\n";
+
+                if (isInPrivate) snippet << "[Currently in PRIVATE region]\n";
+                if (isInPublic)  snippet << "[Currently in PUBLIC  region]\n";
+
+                for (int s = startSnippet; s <= endSnippet; ++s) {
+                    snippet << lines[s] << "\n";
+                }
+                CodeBlock cb;
+                cb.filename = filename;
+                cb.content = snippet.str();
+                defineBlocks.push_back(cb);
+            }
+        }
+        else
+        {
+            if (!insideDefineBlock) {
+                if ((line.find("#if ") != std::string::npos ||
+                    line.find("#ifdef ") != std::string::npos ||
+                    line.find("#ifndef ") != std::string::npos) &&
+                    std::regex_search(line, startDefineRegex))
+                {
+                    insideDefineBlock = true;
+                    defineNesting = 1;
                     currentDefineBlock.str("");
                     currentDefineBlock.clear();
+                    currentDefineBlock << line << "\n";
+                }
+            }
+            else {
+                currentDefineBlock << line << "\n";
+                if (std::regex_search(line, anyIfStartRegex)) {
+                    defineNesting++;
+                }
+                else if (line.find("#endif") != std::string::npos) {
+                    defineNesting--;
+                    if (defineNesting <= 0) {
+                        CodeBlock cb;
+                        cb.filename = filename;
+                        cb.content = "##########\n" + filename + "\n##########\n" +
+                            currentDefineBlock.str();
+                        defineBlocks.push_back(cb);
+
+                        insideDefineBlock = false;
+                        defineNesting = 0;
+                        currentDefineBlock.str("");
+                        currentDefineBlock.clear();
+                    }
                 }
             }
         }
 
-        // Functions
         bool lineHasBraceOrParen = (line.find('{') != std::string::npos ||
             line.find('}') != std::string::npos ||
             line.find('(') != std::string::npos);
@@ -397,6 +561,7 @@ parseFileSinglePass(const std::string& filename,
             }
         }
     }
+
     return { defineBlocks, functionBlocks };
 }
 
@@ -408,7 +573,6 @@ static const std::regex pythonIfAppRegex(
     std::regex_constants::ECMAScript | std::regex_constants::optimize);
 static const std::regex defRegex(R"(^\s*def\s+[\w_]+)");
 
-/** Simple indentation check: each tab counts as 4 spaces. */
 int getIndent(const std::string& ln) {
     return std::accumulate(ln.begin(), ln.end(), 0, [](int sum, char c) {
         return sum + (c == ' ' ? 1 : (c == '\t' ? 4 : 0));
@@ -435,7 +599,6 @@ parsePythonFileSinglePass(const std::string& filename,
         return { ifBlocks, funcBlocks };
     }
 
-    // build a quick regex for "if app.<param>"
     std::ostringstream oss;
     oss << R"((?:if|elif)\s*\(?\s*app\.)" << param << R"(\b)";
     std::regex ifParamRegex(oss.str(), std::regex_constants::ECMAScript | std::regex_constants::optimize);
@@ -461,9 +624,7 @@ parsePythonFileSinglePass(const std::string& filename,
             printProgress(processed.load(), totalLines);
         }
 
-        // start of a def?
         if (std::regex_search(line, defRegex)) {
-            // close out any previous function
             if (insideFunc && functionRelevant) {
                 CodeBlock cb;
                 cb.filename = filename;
@@ -483,7 +644,6 @@ parsePythonFileSinglePass(const std::string& filename,
         if (insideFunc) {
             int currentIndent = getIndent(line);
             bool nextDef = std::regex_search(line, defRegex);
-            // if indentation <= function's indentation => function ends
             if (!line.empty() && currentIndent <= funcIndent && !nextDef) {
                 if (functionRelevant) {
                     CodeBlock cb;
@@ -502,13 +662,11 @@ parsePythonFileSinglePass(const std::string& filename,
             }
         }
 
-        // if app.<param> => collect block
         if (std::regex_search(line, ifParamRegex)) {
             int ifIndent = getIndent(line);
             std::ostringstream blockContent;
             blockContent << line << "\n";
 
-            // subsequent lines with higher indent => part of block
             while (true) {
                 std::streampos pos = ifs.tellg();
                 std::string nextLine;
@@ -537,13 +695,11 @@ parsePythonFileSinglePass(const std::string& filename,
             ifBlocks.push_back(cb);
 
             if (insideFunc) {
-                // this means function is relevant
                 functionRelevant = true;
             }
         }
     }
 
-    // close out a function at EOF if needed
     if (insideFunc && functionRelevant) {
         CodeBlock cb;
         cb.filename = filename;
@@ -584,7 +740,6 @@ std::unordered_set<std::string> collectPythonParameters(const std::vector<std::s
                 size_t start = pos + 7;
                 size_t end = line.find_first_of(" ():", start);
                 std::string param = line.substr(start, end - start);
-
                 if (!param.empty() && blacklist.find(param) == blacklist.end()) {
                     params.insert(param);
                 }
@@ -815,11 +970,9 @@ void findClientHeaderInUserInterface(const fs::path& startPath,
                 for (char c : rel) {
                     lowerRel.push_back(std::tolower((unsigned char)c));
                 }
-                // must contain "userinterface"
                 if (lowerRel.find("userinterface") == std::string::npos) {
                     continue;
                 }
-                // check file
                 auto fn = p.path().filename().string();
                 std::string lowerFn;
                 for (char c : fn) {
@@ -864,11 +1017,9 @@ void findServerHeaderInCommon(const fs::path& startPath,
                 for (char c : rel) {
                     lowerRel.push_back(std::tolower((unsigned char)c));
                 }
-                // must contain "common"
                 if (lowerRel.find("common") == std::string::npos) {
                     continue;
                 }
-                // check if service.h or commondefines.h
                 auto fn = p.path().filename().string();
                 std::string lowerFn;
                 for (char c : fn) {
@@ -963,7 +1114,7 @@ std::vector<std::string> readDefines(const std::string& filename) {
     while (std::getline(ifs, line)) {
         size_t pos = line.find("#define ");
         if (pos != std::string::npos) {
-            std::istringstream iss(line.substr(pos + 8)); // Nach "#define "
+            std::istringstream iss(line.substr(pos + 8)); // "#define "
             std::string defineName;
             iss >> defineName;
             if (!defineName.empty()) {
@@ -989,7 +1140,6 @@ std::vector<fs::path> getSubdirectoriesOfCurrentPath()
             dirs.push_back(p.path());
         }
     }
-    // sort them by name for consistent ordering
     std::sort(dirs.begin(), dirs.end());
     return dirs;
 }
@@ -1018,21 +1168,19 @@ int main()
     auto subdirs = getSubdirectoriesOfCurrentPath();
 
     while (true) {
-        // clear console to keep the menu clean
         clearConsole();
 
-        // Show current states in color
         std::cout << "===============================\n";
         std::cout << "     P A T H   S E T T I N G S \n";
         std::cout << "===============================\n\n";
 
         std::cout << "Client Path: ";
         if (!hasClientHeader) {
-            setColor(12); // red
+            setColor(12);
             std::cout << "(not set)\n";
         }
         else {
-            setColor(10); // green
+            setColor(10);
             std::cout << clientPath.string() << "\n";
         }
         setColor(7);
@@ -1060,7 +1208,6 @@ int main()
         setColor(7);
 
         std::cout << "\n1) Select Client Path";
-        // If set, show (set) in green
         if (hasClientHeader) {
             setColor(10); std::cout << " (set)";
         }
@@ -1096,14 +1243,13 @@ int main()
             return 0;
         }
         else if (configChoice == 4) {
-            // Go to the main menu
+            // main menu
         }
         else if (configChoice == 1) {
-            // select client path from subdirs
             clearConsole();
             if (subdirs.empty()) {
-                std::cout << "No subdirectories found near the .exe!\n";
-                std::cout << "Press ENTER to continue...\n";
+                std::cout << "No subdirectories found!\n";
+                std::cout << "Press ENTER...\n";
                 std::cin.ignore(10000, '\n');
                 continue;
             }
@@ -1125,22 +1271,21 @@ int main()
                 clientHeaderName.clear();
                 findClientHeaderInUserInterface(clientPath, hasClientHeader, clientHeaderName);
                 if (hasClientHeader) {
-                    std::cout << "Found locale_inc.h at: " << clientHeaderName << "\n";
+                    std::cout << "Found locale_inc.h: " << clientHeaderName << "\n";
                 }
                 else {
-                    std::cout << "locale_inc.h not found in that folder.\n";
+                    std::cout << "locale_inc.h not found.\n";
                 }
             }
-            std::cout << "Press ENTER to continue...\n";
+            std::cout << "Press ENTER...\n";
             std::cin.ignore(10000, '\n');
             continue;
         }
         else if (configChoice == 2) {
-            // select server path
             clearConsole();
             if (subdirs.empty()) {
-                std::cout << "No subdirectories found near the .exe!\n";
-                std::cout << "Press ENTER to continue...\n";
+                std::cout << "No subdirectories found!\n";
+                std::cout << "Press ENTER...\n";
                 std::cin.ignore(10000, '\n');
                 continue;
             }
@@ -1162,22 +1307,21 @@ int main()
                 serverHeaderName.clear();
                 findServerHeaderInCommon(serverPath, hasServerHeader, serverHeaderName);
                 if (hasServerHeader) {
-                    std::cout << "Found service.h/commondefines.h at: " << serverHeaderName << "\n";
+                    std::cout << "Found service.h/commondefines.h: " << serverHeaderName << "\n";
                 }
                 else {
                     std::cout << "No service.h/commondefines.h found.\n";
                 }
             }
-            std::cout << "Press ENTER to continue...\n";
+            std::cout << "Press ENTER...\n";
             std::cin.ignore(10000, '\n');
             continue;
         }
         else if (configChoice == 3) {
-            // select python root
             clearConsole();
             if (subdirs.empty()) {
-                std::cout << "No subdirectories found near the .exe!\n";
-                std::cout << "Press ENTER to continue...\n";
+                std::cout << "No subdirectories found!\n";
+                std::cout << "Press ENTER...\n";
                 std::cin.ignore(10000, '\n');
                 continue;
             }
@@ -1199,42 +1343,41 @@ int main()
                 findPythonRoots(chosenDir, pyRoots);
                 if (!pyRoots.empty()) {
                     hasPythonRoot = true;
-                    chosenPythonRoot = pyRoots.front(); // take the first "root" found
-                    std::cout << "Python 'root' found at: " << chosenPythonRoot << "\n";
+                    chosenPythonRoot = pyRoots.front();
+                    std::cout << "Python 'root' found: " << chosenPythonRoot << "\n";
                 }
                 else {
                     hasPythonRoot = false;
                     chosenPythonRoot.clear();
-                    std::cout << "No 'root' folder found in that directory.\n";
+                    std::cout << "No 'root' folder found.\n";
                 }
             }
-            std::cout << "Press ENTER to continue...\n";
+            std::cout << "Press ENTER...\n";
             std::cin.ignore(10000, '\n');
             continue;
         }
         else {
-            // invalid choice
+            // invalid
             continue;
         }
 
-        // If we get here => configChoice == 4 => main menu
+        // ----------------------------------------------
+        // MAIN MENU
+        // ----------------------------------------------
         while (true) {
             clearConsole();
             std::cout << "==============================\n";
             std::cout << "        M A I N   M E N U     \n";
             std::cout << "==============================\n\n";
 
-            // color-coded for availability
             if (hasClientHeader) setColor(10); else setColor(12);
             std::cout << "1) Client\n";
-
             if (hasServerHeader) setColor(10); else setColor(12);
             std::cout << "2) Server\n";
-
-            if (hasPythonRoot) setColor(10); else setColor(12);
+            if (hasPythonRoot)   setColor(10); else setColor(12);
             std::cout << "3) Python\n";
-
             setColor(7);
+
             std::cout << "4) Back to Path Settings\n";
             std::cout << "0) Exit\n";
             std::cout << "Choice: ";
@@ -1253,11 +1396,10 @@ int main()
                 return 0;
             }
             else if (choice == 4) {
-                // back to path selection
-                break;
+                break; // back to path selection
             }
             else if (choice == 1) {
-                // Client
+                // CLIENT
                 clearConsole();
                 if (!hasClientHeader) {
                     std::cerr << "No client header found. Please set Client Path first.\n";
@@ -1299,45 +1441,18 @@ int main()
                     std::string def = defines[dchoice - 1];
                     auto results = parseAllFilesMultiThread(sourceFiles, def);
 
-                    fs::create_directory("Output");
-                    {
-                        std::ostringstream fname;
-                        fname << "Output/CLIENT_" << def << "_DEFINE.txt";
-                        std::ofstream outDef(fname.str());
-                        std::unordered_set<std::string> defFiles;
-                        for (auto& b : results.first) {
-                            outDef << b.content << "\n";
-                            defFiles.insert(b.filename);
-                        }
-                        outDef << "\n--- SUMMARY (" << results.first.size()
-                            << " DEFINE block(s)) in files: ---\n";
-                        for (auto& fn : defFiles) {
-                            outDef << fn << "\n";
-                        }
-                    }
-                    {
-                        std::ostringstream fname;
-                        fname << "Output/CLIENT_" << def << "_FUNC.txt";
-                        std::ofstream outFunc(fname.str());
-                        std::unordered_set<std::string> funcFiles;
-                        for (auto& b : results.second) {
-                            outFunc << b.content << "\n";
-                            funcFiles.insert(b.filename);
-                        }
-                        outFunc << "\n--- SUMMARY (" << results.second.size()
-                            << " function block(s)) in files: ---\n";
-                        for (auto& fn : funcFiles) {
-                            outFunc << fn << "\n";
-                        }
-                    }
+                    writeOutputPerFile("CLIENT", def + "_DEFINE", results.first);
+                    writeOutputPerFile("CLIENT", def + "_FUNC", results.second);
+
                     setColor(10);
-                    std::cout << "Done for define '" << def << "'. Press ENTER...\n";
+                    std::cout << "Done for define '" << def << "' - see 'Output/CLIENT_" << def << "_DEFINE_by_file'...\n";
                     setColor(7);
+                    std::cout << "Press ENTER...\n";
                     std::cin.ignore(10000, '\n');
                 }
             }
             else if (choice == 2) {
-                // Server
+                // SERVER
                 clearConsole();
                 if (!hasServerHeader) {
                     std::cerr << "No server header found. Please set Server Path first.\n";
@@ -1379,48 +1494,21 @@ int main()
                     std::string def = defines[dchoice - 1];
                     auto results = parseAllFilesMultiThread(sourceFiles, def);
 
-                    fs::create_directory("Output");
-                    {
-                        std::ostringstream fname;
-                        fname << "Output/SERVER_" << def << "_DEFINE.txt";
-                        std::ofstream outDef(fname.str());
-                        std::unordered_set<std::string> defFiles;
-                        for (auto& b : results.first) {
-                            outDef << b.content << "\n";
-                            defFiles.insert(b.filename);
-                        }
-                        outDef << "\n--- SUMMARY (" << results.first.size()
-                            << " DEFINE block(s)) in files: ---\n";
-                        for (auto& fn : defFiles) {
-                            outDef << fn << "\n";
-                        }
-                    }
-                    {
-                        std::ostringstream fname;
-                        fname << "Output/SERVER_" << def << "_FUNC.txt";
-                        std::ofstream outFunc(fname.str());
-                        std::unordered_set<std::string> funcFiles;
-                        for (auto& b : results.second) {
-                            outFunc << b.content << "\n";
-                            funcFiles.insert(b.filename);
-                        }
-                        outFunc << "\n--- SUMMARY (" << results.second.size()
-                            << " function block(s)) in files: ---\n";
-                        for (auto& fn : funcFiles) {
-                            outFunc << fn << "\n";
-                        }
-                    }
+                    writeOutputPerFile("SERVER", def + "_DEFINE", results.first);
+                    writeOutputPerFile("SERVER", def + "_FUNC", results.second);
+
                     setColor(10);
-                    std::cout << "Done for define '" << def << "'. Press ENTER...\n";
+                    std::cout << "Done for define '" << def << "' - see 'Output/SERVER_" << def << "_DEFINE_by_file'...\n";
                     setColor(7);
+                    std::cout << "Press ENTER...\n";
                     std::cin.ignore(10000, '\n');
                 }
             }
             else if (choice == 3) {
-                // Python
+                // PYTHON
                 clearConsole();
                 if (!hasPythonRoot) {
-                    std::cerr << "No Python root set. Please set Python Root first.\n";
+                    std::cerr << "No Python root set.\n";
                     std::cout << "Press ENTER...\n";
                     std::cin.ignore(10000, '\n');
                     continue;
@@ -1444,10 +1532,9 @@ int main()
                     std::cin.ignore(10000, '\n');
                     continue;
                 }
-                // gather all possible "app.xyz" parameters
                 auto paramSet = collectPythonParameters(pyFiles);
                 if (paramSet.empty()) {
-                    std::cerr << "No 'if app.xyz' lines found in that root.\n";
+                    std::cerr << "No 'if app.xyz' lines found.\n";
                     std::cout << "Press ENTER...\n";
                     std::cin.ignore(10000, '\n');
                     continue;
@@ -1516,6 +1603,6 @@ int main()
                 // invalid
                 continue;
             }
-        } // end of main menu loop
-    } // end of path config loop
+        }
+    }
 }
