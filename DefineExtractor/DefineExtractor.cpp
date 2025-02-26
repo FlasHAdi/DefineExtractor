@@ -13,7 +13,6 @@
 #include <atomic>
 #include <unordered_map>
 #include <numeric>
-
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -29,7 +28,6 @@ namespace fs = std::experimental::filesystem;
 #endif
 
 using namespace std::chrono;
-
 #define BUFFER_SIZE 8192
 
 /*******************************************************
@@ -257,9 +255,12 @@ parseFileSinglePass(const std::string& filename,
     for (const auto&line : lines) {
         outLineCount++;
 
-        size_t oldVal = processed.fetch_add(1, std::memory_order_relaxed);
-        if ((oldVal + 1) % 200 == 0) {
-            printProgress(oldVal + 1, totalLines);
+        thread_local size_t tls_counter = 0;
+        tls_counter++;
+        if (tls_counter % 500 == 0) {
+            processed.fetch_add(tls_counter, std::memory_order_relaxed);
+            tls_counter = 0;
+            printProgress(processed.load(), totalLines);
         }
 
         // Check for the specific #if <DEFINE>
@@ -452,9 +453,12 @@ parsePythonFileSinglePass(const std::string& filename,
         }
         outLineCount++;
 
-        size_t oldVal = processed.fetch_add(1, std::memory_order_relaxed);
-        if ((oldVal + 1) % 200 == 0) {
-            printProgress(oldVal + 1, totalLines);
+        thread_local size_t tls_counter = 0;
+        tls_counter++;
+        if (tls_counter % 500 == 0) {
+            processed.fetch_add(tls_counter, std::memory_order_relaxed);
+            tls_counter = 0;
+            printProgress(processed.load(), totalLines);
         }
 
         // start of a def?
@@ -613,6 +617,7 @@ void parseWorkerDynamic(const std::vector<std::string>& files,
 {
     std::vector<CodeBlock> localDefine;
     std::vector<CodeBlock> localFunc;
+    thread_local size_t tls_processed = 0;
 
     while (true) {
         size_t idx = nextFileIndex.fetch_add(1, std::memory_order_relaxed);
@@ -627,13 +632,22 @@ void parseWorkerDynamic(const std::vector<std::string>& files,
 
         localDefine.insert(localDefine.end(), pr.first.begin(), pr.first.end());
         localFunc.insert(localFunc.end(), pr.second.begin(), pr.second.end());
-        printProgress(processed.load(), totalLines);
+        tls_processed += lineCountThisFile;
+
+        if (tls_processed >= 1000) {
+            processed.fetch_add(tls_processed);
+            tls_processed = 0;
+            printProgress(processed.load(), totalLines);
+        }
     }
 
     // lock to merge local results into global
     std::lock_guard<std::mutex> lock(consoleMutex);
     defineBlocksOut.insert(defineBlocksOut.end(), localDefine.begin(), localDefine.end());
     functionBlocksOut.insert(functionBlocksOut.end(), localFunc.begin(), localFunc.end());
+    if (tls_processed > 0) {
+        processed.fetch_add(tls_processed);
+    }
 }
 
 /** parseAllFilesMultiThread(files, define):
@@ -699,7 +713,7 @@ void parsePythonWorkerDynamic(const std::vector<std::string>& files,
 {
     std::vector<CodeBlock> localIf;
     std::vector<CodeBlock> localFunc;
-
+    thread_local size_t tls_processed = 0;
     while (true) {
         size_t idx = nextPyFileIndex.fetch_add(1, std::memory_order_relaxed);
         if (idx >= files.size()) {
@@ -714,7 +728,12 @@ void parsePythonWorkerDynamic(const std::vector<std::string>& files,
 
         localIf.insert(localIf.end(), pr.first.begin(), pr.first.end());
         localFunc.insert(localFunc.end(), pr.second.begin(), pr.second.end());
-        printProgress(processed.load(), totalLines);
+        tls_processed += lineCountThisFile;
+        if (tls_processed >= 1000) {
+            processed.fetch_add(tls_processed);
+            tls_processed = 0;
+            printProgress(processed.load(), totalLines);
+        }
     }
 
     std::lock_guard<std::mutex> lock(consoleMutex);
